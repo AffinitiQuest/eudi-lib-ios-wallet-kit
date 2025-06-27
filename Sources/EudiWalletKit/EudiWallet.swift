@@ -438,7 +438,7 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 	/// - Returns: A presentation session instance,
 	public func beginPresentation(flow: FlowType, docType: String? = nil) async -> PresentationSession {
 		do {
-			var format = nil
+			var format: DocDataFormat? = nil
 			if docType == "int.icao.epl.1" {
 				format = .cbor
 			}
