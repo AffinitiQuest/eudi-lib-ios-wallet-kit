@@ -26,6 +26,9 @@ import eudi_lib_sdjwt_swift
 import WalletStorage
 import JSONWebSignature
 import JSONWebAlgorithms
+import SwiftyJSON
+import JOSESwift
+import Tools
 /**
  *  Utility class to generate the session transcript for the OpenID4VP protocol.
  *
@@ -99,7 +102,9 @@ class Openid4VpUtils {
 		var requestItems = RequestItems()
 		var formatsRequested = [String: DocDataFormat]()
 		for inputDescriptor in presentationDefinition.inputDescriptors {
-			let formatRequested: DocDataFormat = inputDescriptor.formatContainer?.formats.contains(where: { $0["designation"].string?.lowercased() == "mso_mdoc" }) ?? false ? .cbor : .sdjwt
+			let formatRequested: DocDataFormat = inputDescriptor.formatContainer?.formats.contains(where: {
+				$0["designation"].string?.lowercased() == "mso_mdoc" }) ?? false ? .cbor : inputDescriptor.formatContainer?.formats.contains(where: {
+					$0["designation"].string?.lowercased() == "jwt_vp" }) ?? false ? .w3cjwt : .sdjwt
 			let filterValue = inputDescriptor.constraints.fields.first { $0.filter?["const"].string != nil }?.filter?["const"].string
 			let docType = filterValue ?? inputDescriptor.id.trimmingCharacters(in: .whitespacesAndNewlines)
 			let id = idsToDocTypes.first { Openid4VpUtils.vctToDocTypeMatch($1, docType) && dataFormats[$0] == formatRequested }?.key ?? ""
@@ -110,7 +115,7 @@ class Openid4VpUtils {
 				if nsItems[pair.0] == nil { nsItems[pair.0] = [] }
 				if !nsItems[pair.0]!.contains(pair.1) { nsItems[pair.0]!.append(pair.1) }
 			}
-			if !nsItems.isEmpty { inputDescriptorMap[docType] = inputDescriptor.id; requestItems[docType] = nsItems; formatsRequested[docType] = formatRequested }
+			if !nsItems.isEmpty { inputDescriptorMap[docType] = inputDescriptor.id; requestItems[id] = nsItems; formatsRequested[docType] = formatRequested }
 		}
 		return (requestItems, formatsRequested, inputDescriptorMap)
 	}
@@ -163,6 +168,70 @@ class Openid4VpUtils {
 		let holderPresentation = try await SDJWTIssuer.presentation(
           holdersPrivateKey: signer, signedSDJWT: presentedSdJwt, disclosuresToPresent: presentedSdJwt.disclosures, keyBindingJWT: kbJwt)
 		return holderPresentation
+	}
+	
+	static func unencodedBase64Payload(header: Data) throws -> Bool {
+	  let headerFields = try JSONDecoder.jwt.decode(DefaultJWSHeaderImpl.self, from: header)
+	  guard
+		let hasBase64Header = headerFields.base64EncodedUrlPayload,
+		!hasBase64Header
+	  else { return false }
+	  return true
+	}
+	
+	static func buildSigningData(header: Data, data: Data) throws -> Data {
+	  if try unencodedBase64Payload(header: header) {
+		let headerB64 = Base64URL.encode(header)
+		return try [headerB64, data.tryToString()].joined(separator: ".").tryToData()
+	  }
+	  guard
+		let signingData = [header, data]
+		  .map({ Base64URL.encode($0) })
+		  .joined(separator: ".")
+		  .data(using: .utf8)
+	  else {
+		print("ERROR")
+		  throw WalletError.generic("Hello")
+	  }
+	  return signingData
+	}
+	
+	static func getJwtVcPresentation(_ jwt: String, hashingAlg: HashingAlgorithm, signer: SecureAreaSigner, signAlg: JSONWebAlgorithms.SigningAlgorithm, requestItems: [RequestItem], nonce: String, aud: String, didJwk: String) async throws -> JSONWebSignature.JWS? {
+//		let requestPaths = requestItems.map(\.elementPath)
+//		if query.isEmpty { throw WalletError(description: "No items to present found") }
+//		let presentedSdJwt = try await sdJwt.present(query: query)
+//		guard let presentedSdJwt else { return nil }
+		let digestCreator = DigestCreator(hashingAlgorithm: hashingAlg)
+		guard let sdHash = digestCreator.hashAndBase64Encode(input: jwt) else { return nil }
+//		let kbJwt: KBJWT = try KBJWT(header: DefaultJWSHeaderImpl(algorithm: signAlg),
+//			kbJwtPayload: .init([Keys.nonce.rawValue: nonce, Keys.aud.rawValue: aud, Keys.iat.rawValue: Int(Date().timeIntervalSince1970.rounded()), Keys.sdHash.rawValue: sdHash]))
+		
+		if let asyncSigner = signer as? AsyncSignerProtocol {
+			let kbJWTPayload: JSON = .init([Keys.nonce.rawValue: nonce, Keys.aud.rawValue: aud, Keys.iat.rawValue: Int(Date().timeIntervalSince1970.rounded()), Keys.sdHash.rawValue: sdHash])
+			
+			let protectedHeaderData = try JSONEncoder
+				.jose
+				.encode(
+					DefaultJWSHeaderImpl(algorithm: signAlg, keyID: didJwk)
+				)
+		  
+			let signingData = try buildSigningData(
+				header: protectedHeaderData,
+				data: kbJWTPayload.rawData()
+			)
+		  
+		  let signature = try await asyncSigner.signAsync(signingData)
+		  let signedKBJwt = try? JWS(
+			protectedHeaderData: protectedHeaderData,
+			data: kbJWTPayload.rawData(),
+			signature: signature
+		  )
+		  
+			return signedKBJwt
+		}
+		//let holderPresentation = try await SDJWTIssuer.presentation(
+		  //holdersPrivateKey: signer, signedSDJWT: presentedSdJwt, disclosuresToPresent: presentedSdJwt.disclosures, keyBindingJWT: kbJwt)
+		return nil
 	}
 
 	static func filterSignedJwtByDocType(_ sdJwt: SignedSDJWT, docType: String) -> Bool {

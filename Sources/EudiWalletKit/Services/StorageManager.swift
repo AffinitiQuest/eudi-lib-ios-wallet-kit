@@ -119,6 +119,7 @@ public class StorageManager: ObservableObject, @unchecked Sendable {
 		switch doc.docDataFormat {
 		case .cbor:	toCborMdocModel(doc: doc, uiCulture: uiCulture, modelFactory: modelFactory)
 		case .sdjwt: toSdJwtDocModel(doc: doc, uiCulture: uiCulture)
+		case .w3cjwt: toW3CJwtDocModel(doc: doc, uiCulture: uiCulture)
 		}
 	}
 
@@ -151,6 +152,21 @@ public class StorageManager: ObservableObject, @unchecked Sendable {
 		return GenericMdocModel(id: doc.id, createdAt: doc.createdAt, docType: doc.docType ?? type, displayName: docMetadata?.getDisplayName(uiCulture), display: docMetadata?.display, issuerDisplay: docMetadata?.issuerDisplay, credentialIssuerIdentifier: md?.credentialIssuerIdentifier, configurationIdentifier: md?.configurationIdentifier, validFrom: validFrom, validUntil: validUntil, modifiedAt: doc.modifiedAt, docClaims: docClaims, docDataFormat: .sdjwt, hashingAlg: recreatedClaims.hashingAlg)
 	}
 	
+	public static func toW3CJwtDocModel(doc: WalletStorage.Document, uiCulture: String?, modelFactory: (any DocClaimsDecodableFactory)? = nil) -> (any DocClaimsDecodable)? {
+		var docClaims = [DocClaim]()
+		let docMetadata: DocMetadata? = DocMetadata(from: doc.metadata)
+		let md = docMetadata?.getFlatClaimMetadata(uiCulture: uiCulture)
+		guard let recreatedClaims = recreateW3CClaims(docData: doc.data) else { return nil }
+		if let cs = recreatedClaims.toClaimsArray(md?.claimDisplayNames, md?.mandatoryClaims, md?.claimValueTypes)?.0 { docClaims.append(contentsOf: cs) }
+		var type = docClaims.first(where: { $0.name == "vct"})?.stringValue
+		if type == nil || type!.isEmpty { type = docClaims.first(where: { $0.name == "evidence"})?.children?.first(where: { $0.name == "type"})?.stringValue }
+		let validFrom: Date? = if case let .date(s) = docClaims.first(where: { $0.name == JWTClaimNames.issuedAt})?.dataValue { ISO8601DateFormatter().date(from: s) } else { nil }
+		let validUntil: Date? = if case let .date(s) = docClaims.first(where: { $0.name == JWTClaimNames.expirationTime})?.dataValue { ISO8601DateFormatter().date(from: s) } else { nil }
+		return nil
+		
+		//GenericMdocModel(id: doc.id, createdAt: doc.createdAt, docType: doc.docType ?? type, displayName: docMetadata?.getDisplayName(uiCulture), display: docMetadata?.display, issuerDisplay: docMetadata?.issuerDisplay, credentialIssuerIdentifier: md?.credentialIssuerIdentifier, configurationIdentifier: md?.configurationIdentifier, validFrom: validFrom, validUntil: validUntil, modifiedAt: doc.modifiedAt, docClaims: docClaims, docDataFormat: .sdjwt, hashingAlg: recreatedClaims.hashingAlg)
+	}
+	
 	public static func getHashingAlgorithm(doc: WalletStorage.Document) -> String? {
 		guard doc.docDataFormat == .sdjwt else { return nil }
 		guard let recreatedClaims = recreateSdJwtClaims(docData: doc.data) else { return nil }
@@ -160,6 +176,19 @@ public class StorageManager: ObservableObject, @unchecked Sendable {
 	public static func getVctFromSdJwt(docData: Data) -> String? {
 		guard let recreatedClaims = recreateSdJwtClaims(docData: docData) else { return nil }
 		return recreatedClaims.json["vct"].stringValue
+	}
+	
+	static func recreateW3CClaims(docData: Data) -> JSON? {
+		let parser = CompactParser()
+		guard let serString = String(data: docData, encoding: .utf8) else { logger.error("Failed to conver document data to UTF8 string"); return nil}
+		let (_, payload, _) = extractJWTParts(serString)
+		var recreatedClaims: JSON?;
+		do {
+			guard let payloadData = Data(base64URLEncoded: payload), let payload = try? JSON(data: payloadData) else { logger.error("Failed to base64url decode payload"); return nil }
+			recreatedClaims = payload
+		} catch { logger.error("Failed to recreate claims from JWT: \(error)") }
+		guard let recreatedClaims else { return nil }
+		return recreatedClaims
 	}
 	
 	static func recreateSdJwtClaims(docData: Data) -> (json: JSON, hashingAlg: String)? {

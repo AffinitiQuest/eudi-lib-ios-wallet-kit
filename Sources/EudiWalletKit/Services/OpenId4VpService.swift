@@ -27,7 +27,41 @@ import eudi_lib_sdjwt_swift
 import JOSESwift
 import Logging
 import X509
+import SwiftyJSON
+
+struct AQDescriptorMap: Codable {
+	let id: String
+	let format: String
+	let path: String
+	var nested_path: [String: String]?
+
+	public init(id: String, format: String, path: String) {
+	  self.id = id
+	  self.format = format
+	  self.path = path
+	}
+}
+
 /// Implements remote attestation presentation to online verifier
+public struct JWTVPProof: Codable {
+	var type: String
+	var proofPurpose: String
+	var jws: String
+}
+
+public struct JWTVerifiablePresentation: Codable {
+	var context: [String]
+	var type: [String]
+	var vp: [String: [String]]
+	var proof: JWTVPProof
+	
+	enum CodingKeys: String, CodingKey, CaseIterable {
+		case context = "@context"
+		case type
+		case vp
+		case proof
+	}
+}
 
 /// Implementation is based on the OpenID4VP specification
 public final class OpenId4VpService: @unchecked Sendable, PresentationService {
@@ -176,18 +210,20 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 				makeCborDocs()
 			}
 			let parser = CompactParser()
-			let docStrings = docs.filter { k,v in Self.filterFormat(dataFormats[k]!, fmt: .sdjwt)}.compactMapValues { String(data: $0, encoding: .utf8) }
-			docsSdJwt = docStrings.compactMapValues { try? parser.getSignedSdJwt(serialisedString: $0) }
+			let docTypeToFilter: DocDataFormat = formatsRequested.first?.value ?? .w3cjwt
+			let docStrings = docs.filter { k,v in Self.filterFormat(dataFormats[k]!, fmt: docTypeToFilter)}.compactMapValues { String(data: $0, encoding: .utf8) }
+			//docsSdJwt = docStrings.compactMapValues { try? parser.getSignedSdJwt(serialisedString: $0) }
 			var inputToPresentations = [(String, VpToken.VerifiablePresentation)]()
 			// support sd-jwt documents
 			for (docId, nsItems) in itemsToSend {
-				guard let docType = idsToDocTypes[docId], let inputDescrId = inputDescriptorMap[docType] else { continue }
+				guard let docType = idsToDocTypes[docId], let inputDescrId = inputDescriptorMap["BigBeaverBread"] else { continue }
 				if dataFormats[docId] == .cbor {
 					if docsCbor == nil { makeCborDocs() }
 					let itemsToSend1 = Dictionary(uniqueKeysWithValues: [(docId, nsItems)])
 					let vpToken = try await generateCborVpToken(itemsToSend: itemsToSend1)
 					 inputToPresentations.append((inputDescrId, vpToken))
 				} else if dataFormats[docId] == .sdjwt {
+					docsSdJwt = docStrings.compactMapValues { try? parser.getSignedSdJwt(serialisedString: $0) }
 					let docSigned = docsSdJwt[docId]; let dpk = devicePrivateKeys[docId]
 					guard let docSigned, let dpk, let items = nsItems.first?.value else { continue }
 					let unlockData = try await dpk.secureArea.unlockKey(id: docId)
@@ -199,6 +235,28 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 						continue
 					}
 					inputToPresentations.append((inputDescrId, VpToken.VerifiablePresentation.generic(presented.serialisation)))
+				} else if dataFormats[docId] == .w3cjwt {
+					let docSigned = docStrings[docId]; let dpk = devicePrivateKeys[docId]
+					guard let docSigned, let dpk, let items = nsItems.first?.value else { continue }
+					let unlockData = try await dpk.secureArea.unlockKey(id: docId)
+					let keyInfo = try await dpk.secureArea.getKeyInfo(id: docId);	let dsa = keyInfo.publicKey.crv.defaultSigningAlgorithm
+					let signer = try SecureAreaSigner(secureArea: dpk.secureArea, id: docId, ecAlgorithm: dsa, unlockData: unlockData)
+					let signAlg = try SecureAreaSigner.getSigningAlgorithm(dsa)
+					let hai = HashingAlgorithmIdentifier(rawValue: docsHashingAlgs[docId] ?? "") ?? .SHA3256
+					let publicKey = try keyInfo.publicKey.toSecKey().jwk
+					var didJwk = ""
+					if let jsonData = try publicKey.toDictionary().jsonData {
+						didJwk = "did:jwk:\(jsonData.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: ""))#0"
+					}
+					guard let idToken = try await Openid4VpUtils.getJwtVcPresentation(docSigned, hashingAlg: hai.hashingAlgorithm(), signer: signer, signAlg: signAlg, requestItems: items, nonce: vpNonce, aud: vpClientId, didJwk: didJwk) else {
+						continue
+					}
+					
+					let verifiablePresentation: JWTVerifiablePresentation = JWTVerifiablePresentation(context: ["https://www.w3.org/2018/credentials/v1"], type: ["VerifiablePresentation"], vp: ["verifiableCredential": [docSigned]], proof: JWTVPProof(type: "ES256", proofPurpose: "authentication", jws: idToken.compactSerialization))
+					
+					let jsonData = try JSONEncoder().encode(verifiablePresentation)
+					let jsonVP = try JSON.init(jsonData)
+					inputToPresentations.append((inputDescrId, VpToken.VerifiablePresentation.json(jsonVP)))
 				}
 			}
 			try await SendVpToken(inputToPresentations, pd, resolved, onSuccess)
@@ -211,7 +269,17 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 		let consent: ClientConsent = if let vpTokens {
 			.vpToken(vpToken: .init(apu: mdocGeneratedNonce.base64urlEncode, verifiablePresentations: vpTokens.map(\.1)), presentationSubmission: .init(id: UUID().uuidString, definitionID: pd.id, descriptorMap: vpTokens.enumerated().map { i,v in
 			 let descr = pd.inputDescriptors.first(where: { $0.id == v.0 })!
-			 return DescriptorMap(id: descr.id, format: descr.formatContainer?.formats.first?["designation"].string ?? "", path: vpTokens.count == 1 ? "$" : "$[\(i)]")
+				var nestedPath: String? = nil
+				switch v.1 {
+				case .json(_):
+					nestedPath = "$.vp.verifiableCredential[0]"
+				case .generic(_):
+					nestedPath = nil
+				case .msoMdoc(_):
+					nestedPath = nil
+				}
+				
+				return DescriptorMap(id: descr.id, format: descr.formatContainer?.formats.first?["designation"].string ?? "", path: vpTokens.count == 1 ? "$" : "$[\(i)]", nestedPath: nestedPath)
 			}))
 		} else { .negative(message: "Rejected") }
 		// Generate a direct post authorisation response
@@ -253,6 +321,7 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 			let verifierMetaData = PreregisteredClient(clientId: "Verifier", legalName: verifierLegalName, jarSigningAlg: JWSAlgorithm(.RS256), jwkSetSource: WebKeySource.fetchByReference(url: URL(string: "\(verifierApiUrl)/wallet/public-keys.json")!))
 			supportedClientIdSchemes += [.preregistered(clients: [verifierMetaData.clientId: verifierMetaData])]
 	  }
+		supportedClientIdSchemes += [.did(lookup: AQDidResolver())]
 		let res = SiopOpenId4VPConfiguration(subjectSyntaxTypesSupported: [.decentralizedIdentifier, .jwkThumbprint], preferredSubjectSyntaxType: .jwkThumbprint, decentralizedIdentifier: try! DecentralizedIdentifier(rawValue: "did:example:123"), signingKey: privateKey, signingKeySet: keySet, supportedClientIdSchemes: supportedClientIdSchemes, vpFormatsSupported: [], session: urlSession)
 		return res
 	}

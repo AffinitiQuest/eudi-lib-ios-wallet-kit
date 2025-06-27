@@ -52,9 +52,12 @@ public final class OpenId4VCIService: NSObject, @unchecked Sendable, ASWebAuthen
 		let crvType = issueReq.keyOptions?.curve ?? type(of: issueReq.secureArea).defaultEcCurve
 		let secureAreaSigningAlg: SigningAlgorithm = crvType.defaultSigningAlgorithm
 		let algTypes = algSupported.compactMap { JWSAlgorithm.AlgorithmType(rawValue: $0) }
-		guard !algTypes.isEmpty, let algType = JWSAlgorithm.AlgorithmType(rawValue: secureAreaSigningAlg.rawValue), algTypes.contains(algType) else {
+		guard let algType = JWSAlgorithm.AlgorithmType(rawValue: secureAreaSigningAlg.rawValue) else {
 			throw WalletError(description: "Unable to find supported signing algorithm \(secureAreaSigningAlg)")
 		}
+//		guard !algTypes.isEmpty, let algType = JWSAlgorithm.AlgorithmType(rawValue: secureAreaSigningAlg.rawValue), algTypes.contains(algType) else {
+//			throw WalletError(description: "Unable to find supported signing algorithm \(secureAreaSigningAlg)")
+//		}
 		let publicCoseKey = try await issueReq.createKey()
 		let publicKey: SecKey = try publicCoseKey.toSecKey()
 		let publicKeyJWK = try ECPublicKey(publicKey: publicKey, additionalParameters: ["alg": JWSAlgorithm(algType).name, "use": "sig", "kid": UUID().uuidString])
@@ -197,12 +200,15 @@ public final class OpenId4VCIService: NSObject, @unchecked Sendable, ASWebAuthen
 	}
 
 	func getCredentialIdentifier(credentialIssuerIdentifier: String, issuerDisplay: [Display], credentialsSupported: [CredentialConfigurationIdentifier: CredentialSupported], identifier: String?, docType: String?, scope: String?) throws -> CredentialConfiguration {
-			if let credential = credentialsSupported.first(where: { if case .msoMdoc(let msoMdocCred) = $0.value, msoMdocCred.docType == docType || docType == nil, $0.key.value == identifier || identifier == nil { true } else { false } }), case let .msoMdoc(msoMdocConf) = credential.value, let scope = msoMdocConf.scope {
+		if let credential = credentialsSupported.first(where: { if case .msoMdoc(let msoMdocCred) = $0.value, msoMdocCred.docType == docType || docType == nil, $0.key.value == identifier || identifier == nil { true } else { false } }), case let .msoMdoc(msoMdocConf) = credential.value, let scope = msoMdocConf.scope {
 			logger.info("msoMdoc with scope \(scope), cryptographic suites: \(msoMdocConf.credentialSigningAlgValuesSupported)")
 				return CredentialConfiguration(configurationIdentifier: credential.key, credentialIssuerIdentifier: credentialIssuerIdentifier, docType: docType, scope: scope, display: msoMdocConf.display.map(\.displayMetadata), issuerDisplay: issuerDisplay.map(\.displayMetadata), algValuesSupported: msoMdocConf.proofTypesSupported?["jwt"]?.algorithms ?? [], msoClaims: msoMdocConf.claims, flatClaims: nil, order: msoMdocConf.order, format: .cbor)
 		} else if let credential =  credentialsSupported.first(where: { if case .sdJwtVc(let sdJwtVc) = $0.value, sdJwtVc.scope == scope || scope == nil, $0.key.value == identifier || identifier == nil { true } else { false } }), case let .sdJwtVc(sdJwtVc) = credential.value, let scope = sdJwtVc.scope {
 			logger.info("sdJwtVc with scope \(scope), cryptographic suites: \(sdJwtVc.credentialSigningAlgValuesSupported)")
 			return CredentialConfiguration(configurationIdentifier: credential.key, credentialIssuerIdentifier: credentialIssuerIdentifier, docType: docType, scope: scope, display: sdJwtVc.display.map(\.displayMetadata), issuerDisplay: issuerDisplay.map(\.displayMetadata), algValuesSupported: sdJwtVc.proofTypesSupported?["jwt"]?.algorithms ?? [], msoClaims: nil, flatClaims: sdJwtVc.claims, order: nil, format: .sdjwt)
+		} else if let credential = credentialsSupported.first(where: { if case .w3CSignedJwt(let w3CSignedJwt) = $0.value, $0.key.value == identifier || identifier == nil { true } else { false } }), case let .w3CSignedJwt(w3CSignedJwt) = credential.value {
+			logger.info("w3CSignedJwt, cryptographic suites: \(w3CSignedJwt.credentialSigningAlgValuesSupported)")
+			return CredentialConfiguration(configurationIdentifier: credential.key, credentialIssuerIdentifier: credentialIssuerIdentifier, docType: docType, scope: "", display: w3CSignedJwt.display.map(\.displayMetadata), issuerDisplay: issuerDisplay.map(\.displayMetadata), algValuesSupported: w3CSignedJwt.proofTypesSupported?["jwt"]?.algorithms ?? [], msoClaims: nil, flatClaims: nil, order: nil, format: .w3cjwt)
 		}
 		logger.error("No credential for docType \(docType ?? scope ?? identifier ?? ""). Currently supported credentials: \(credentialsSupported.keys)")
 		throw WalletError(description: "Issuer does not support docType or scope or identifier \(docType ?? scope ?? identifier ?? "")")
@@ -212,6 +218,7 @@ public final class OpenId4VCIService: NSObject, @unchecked Sendable, ASWebAuthen
 			let credentialInfos = credentialsSupported.compactMap {
 				if case .msoMdoc(let msoMdocCred) = $0.value, let scope = msoMdocCred.scope, case let offered = OfferedDocModel(credentialConfigurationIdentifier: $0.key.value, docType: msoMdocCred.docType, scope: scope, displayName: msoMdocCred.display.getName(uiCulture) ?? msoMdocCred.docType, algValuesSupported: msoMdocCred.credentialSigningAlgValuesSupported) { (identifier: $0.key, scope: scope, offered: offered) }
 				else if case .sdJwtVc(let sdJwtVc) = $0.value, let scope = sdJwtVc.scope, case let offered = OfferedDocModel(credentialConfigurationIdentifier: $0.key.value, docType: nil, scope: scope, displayName: sdJwtVc.display.getName(uiCulture) ?? scope, algValuesSupported: sdJwtVc.credentialSigningAlgValuesSupported) { (identifier: $0.key, scope: scope, offered: offered) }
+				else if case .w3CSignedJwt(let w3CSignedJwt) = $0.value, case let offered = OfferedDocModel(credentialConfigurationIdentifier: $0.key.value, docType: w3CSignedJwt.docType ?? "VerifiableCredential", scope: "", displayName: w3CSignedJwt.display.getName(uiCulture) ?? w3CSignedJwt.docType ?? "VerifiableCredential", algValuesSupported: w3CSignedJwt.credentialSigningAlgValuesSupported) { (identifier: $0.key, scope: "", offered: offered) }
 				else { nil } }
 			return credentialInfos
 	}

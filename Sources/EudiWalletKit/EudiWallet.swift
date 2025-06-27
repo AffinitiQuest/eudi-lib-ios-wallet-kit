@@ -438,7 +438,12 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 	/// - Returns: A presentation session instance,
 	public func beginPresentation(flow: FlowType, docType: String? = nil) async -> PresentationSession {
 		do {
-			let parameters = try await prepareServiceDataParameters(docType: docType, format: flow == .ble ? .cbor : nil)
+			var format = nil
+			if docType == "int.icao.epl.1" {
+				format = .cbor
+			}
+
+			let parameters = try await prepareServiceDataParameters(docType: docType, format: format /*flow == .ble ? .cbor : nil*/)
 			let docIdAndTypes = storage.getDocIdsToTypes()
 			switch flow {
 			case .ble:
