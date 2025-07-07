@@ -117,7 +117,7 @@ class Openid4VpUtils {
 			}
 			if !nsItems.isEmpty { 
 				inputDescriptorMap[docType] = inputDescriptor.id 
-				if formatRequested == .cbor {}
+				if formatRequested == .cbor {
 					requestItems[docType] = nsItems 
 				} else {
 					requestItems[id] = nsItems 
