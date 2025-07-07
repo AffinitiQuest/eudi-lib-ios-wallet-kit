@@ -162,9 +162,7 @@ public class StorageManager: ObservableObject, @unchecked Sendable {
 		if type == nil || type!.isEmpty { type = docClaims.first(where: { $0.name == "evidence"})?.children?.first(where: { $0.name == "type"})?.stringValue }
 		let validFrom: Date? = if case let .date(s) = docClaims.first(where: { $0.name == JWTClaimNames.issuedAt})?.dataValue { ISO8601DateFormatter().date(from: s) } else { nil }
 		let validUntil: Date? = if case let .date(s) = docClaims.first(where: { $0.name == JWTClaimNames.expirationTime})?.dataValue { ISO8601DateFormatter().date(from: s) } else { nil }
-		return nil
-		
-		//GenericMdocModel(id: doc.id, createdAt: doc.createdAt, docType: doc.docType ?? type, displayName: docMetadata?.getDisplayName(uiCulture), display: docMetadata?.display, issuerDisplay: docMetadata?.issuerDisplay, credentialIssuerIdentifier: md?.credentialIssuerIdentifier, configurationIdentifier: md?.configurationIdentifier, validFrom: validFrom, validUntil: validUntil, modifiedAt: doc.modifiedAt, docClaims: docClaims, docDataFormat: .sdjwt, hashingAlg: recreatedClaims.hashingAlg)
+		return GenericMdocModel(id: doc.id, createdAt: doc.createdAt, docType: doc.docType ?? type, displayName: docMetadata?.getDisplayName(uiCulture), display: docMetadata?.display, issuerDisplay: docMetadata?.issuerDisplay, credentialIssuerIdentifier: md?.credentialIssuerIdentifier, configurationIdentifier: md?.configurationIdentifier, validFrom: validFrom, validUntil: validUntil, modifiedAt: doc.modifiedAt, docClaims: docClaims, docDataFormat: .w3cjwt, hashingAlg: nil)
 	}
 	
 	public static func getHashingAlgorithm(doc: WalletStorage.Document) -> String? {

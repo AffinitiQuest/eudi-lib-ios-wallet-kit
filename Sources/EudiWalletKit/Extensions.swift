@@ -244,6 +244,14 @@ extension JSON {
 						partialResult.1 += (partialResult.1.count == 0 ? "" : ", ") + str1
 					}
 				}
+			} else if case let claims = self["vc"]["credentialSubject"], claims.type == .dictionary {
+				let initialResult = self["vc"]["credentialSubject"].toClaimsArray(claimDisplayNames, mandatoryClaims, claimValueTypes) ?? ([DocClaim](), "")
+				return claims.reduce(into: initialResult) { (partialResult, el: (String, JSON)) in
+					if let (claims1, str1) = el.1.toClaimsArray(claimDisplayNames, mandatoryClaims, claimValueTypes, el.0) {
+						partialResult.0.append(contentsOf: claims1)
+						partialResult.1 += (partialResult.1.count == 0 ? "" : ", ") + str1
+					}
+				}
 			}
 			var a = [DocClaim]()
 			for (n,(key,subJson)) in enumerated() {
