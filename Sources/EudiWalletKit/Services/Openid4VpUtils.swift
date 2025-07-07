@@ -115,7 +115,15 @@ class Openid4VpUtils {
 				if nsItems[pair.0] == nil { nsItems[pair.0] = [] }
 				if !nsItems[pair.0]!.contains(pair.1) { nsItems[pair.0]!.append(pair.1) }
 			}
-			if !nsItems.isEmpty { inputDescriptorMap[docType] = inputDescriptor.id; requestItems[id] = nsItems; formatsRequested[docType] = formatRequested }
+			if !nsItems.isEmpty { 
+				inputDescriptorMap[docType] = inputDescriptor.id 
+				if formatRequested == .cbor {}
+					requestItems[docType] = nsItems 
+				} else {
+					requestItems[id] = nsItems 
+				}
+				formatsRequested[docType] = formatRequested 
+			}
 		}
 		return (requestItems, formatsRequested, inputDescriptorMap)
 	}
