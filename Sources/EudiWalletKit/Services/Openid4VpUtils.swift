@@ -138,7 +138,7 @@ class Openid4VpUtils {
 		let rootDisplayName = displayNames??[nsItemPair.0]?[rootPathComponent] // currently only first level
 		let displayNames = [rootDisplayName] + Array(repeating: nil, count: elementPath.count-1)
 		var namespaceName = "all"
-		if(nsItemPair.0 != "") {
+		if nsItemPair.0 != "" {
 			namespaceName = nsItemPair.0
 		}
 		return (namespaceName, RequestItem(elementPath: elementPath, displayNames: displayNames, intentToRetain: field.intentToRetain ?? false, isOptional: field.optional ?? false))
