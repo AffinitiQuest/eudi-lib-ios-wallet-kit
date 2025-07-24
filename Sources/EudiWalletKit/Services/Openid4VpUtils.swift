@@ -117,11 +117,12 @@ class Openid4VpUtils {
 			}
 			if !nsItems.isEmpty { 
 				inputDescriptorMap[docType] = inputDescriptor.id 
-				if formatRequested == .cbor {
-					requestItems[docType] = nsItems 
-				} else {
-					requestItems[id] = nsItems 
-				}
+				requestItems[docType] = nsItems 
+				// if formatRequested == .cbor {
+				// 	requestItems[docType] = nsItems 
+				// } else {
+				// 	requestItems[id] = nsItems 
+				// }
 				formatsRequested[docType] = formatRequested 
 			}
 		}
@@ -136,7 +137,11 @@ class Openid4VpUtils {
 		let rootPathComponent = elementPath.first!
 		let rootDisplayName = displayNames??[nsItemPair.0]?[rootPathComponent] // currently only first level
 		let displayNames = [rootDisplayName] + Array(repeating: nil, count: elementPath.count-1)
-		return (nsItemPair.0, RequestItem(elementPath: elementPath, displayNames: displayNames, intentToRetain: field.intentToRetain ?? false, isOptional: field.optional ?? false))
+		var namespaceName = "all"
+		if(nsItemPair.0 != "") {
+			namespaceName = nsItemPair.0
+		}
+		return (namespaceName, RequestItem(elementPath: elementPath, displayNames: displayNames, intentToRetain: field.intentToRetain ?? false, isOptional: field.optional ?? false))
 	}
 
 	/// parse path and return (namespace, itemIdentifier) pair for jwt format
