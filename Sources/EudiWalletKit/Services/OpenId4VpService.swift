@@ -167,6 +167,7 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 					if let readerCertificateIssuer {
 						result.readerAuthValidated = readerAuthValidated
 						result.readerCertificateIssuer = MdocHelpers.getCN(from: readerCertificateIssuer)
+						result.readerLegalName = MdocHelpers.getO(from: readerCertificateIssuer)
 						result.readerCertificateValidationMessage = readerCertificateValidationMessage
 					}
 					return result
