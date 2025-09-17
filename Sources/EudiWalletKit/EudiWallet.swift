@@ -416,7 +416,11 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 	/// - Returns: An ``InitializeTransferData`` instance that can be used to initialize a presentation service
 	public func prepareServiceDataParameters(docType: String? = nil, format: DocDataFormat? = nil) async throws -> InitializeTransferData {
 		var parameters: InitializeTransferData
-		guard var docs = try await storage.storageService.loadDocuments(status: .issued) else { throw WalletError(description: "No documents found") }
+		var docs = []
+		if let currentDocs = try await storage.storageService.loadDocuments(status: .issued) {
+			docs = currentDocs
+		}
+		//guard var docs = try await storage.storageService.loadDocuments(status: .issued), docs.count > 0 else { throw WalletError(description: "No documents found") }
 		if let docType { docs = docs.filter { $0.docType == docType} }
 		if let docType { guard docs.count > 0 else { throw WalletError(description: "No documents of type \(docType) found") } }
 		if let format { docs = docs.filter { $0.docDataFormat == format } }
