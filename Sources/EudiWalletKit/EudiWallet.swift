@@ -416,7 +416,7 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 	/// - Returns: An ``InitializeTransferData`` instance that can be used to initialize a presentation service
 	public func prepareServiceDataParameters(docType: String? = nil, format: DocDataFormat? = nil) async throws -> InitializeTransferData {
 		var parameters: InitializeTransferData
-		var docs = []
+		var docs: [WalletStorage.Document] = []
 		if let currentDocs = try await storage.storageService.loadDocuments(status: .issued) {
 			docs = currentDocs
 		}
@@ -425,7 +425,7 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 		if let docType { guard docs.count > 0 else { throw WalletError(description: "No documents of type \(docType) found") } }
 		if let format { docs = docs.filter { $0.docDataFormat == format } }
 		let cborsWithKeys = docs.compactMap { $0.getDataForTransfer() }
-		guard cborsWithKeys.count > 0 else { throw WalletError(description: "Documents decode error") }
+		//guard cborsWithKeys.count > 0 else { throw WalletError(description: "Documents decode error") }
 		let docData = Dictionary(uniqueKeysWithValues: cborsWithKeys.map(\.doc))
 		let keyData = Dictionary(uniqueKeysWithValues: cborsWithKeys.map(\.sa))
 		let idsToDocTypes = Dictionary(uniqueKeysWithValues: docs.filter({$0.docType != nil}).map { ($0.id, $0.docType!) })
