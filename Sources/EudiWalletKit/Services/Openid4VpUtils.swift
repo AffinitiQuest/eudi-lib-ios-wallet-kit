@@ -29,6 +29,7 @@ import OpenID4VP
 import enum OpenID4VP.ClaimPathElement
 import struct OpenID4VP.ClaimPath
 import SwiftyJSON
+import Tools
 
 class OpenId4VpUtils {
 	//  example path: "$['eu.europa.ec.eudiw.pid.1']['family_name']"
@@ -124,6 +125,63 @@ class OpenId4VpUtils {
 		let holderPresentation = try await SDJWTIssuer.presentation(holdersPrivateKey: signer, signedSDJWT: presentedSdJwt, disclosuresToPresent: presentedSdJwt.disclosures, keyBindingJWT: kbJwt)
 		return holderPresentation
 	}
+	
+	static func unencodedBase64Payload(header: Data) throws -> Bool {
+	  let headerFields = try JSONDecoder.jwt.decode(DefaultJWSHeaderImpl.self, from: header)
+	  guard
+		let hasBase64Header = headerFields.base64EncodedUrlPayload,
+		!hasBase64Header
+	  else { return false }
+	  return true
+	}
+	
+	static func buildSigningData(header: Data, data: Data) throws -> Data {
+	  if try unencodedBase64Payload(header: header) {
+		  let headerB64 = Base64URL.encode(header)
+		return try [headerB64, data.tryToString()].joined(separator: ".").tryToData()
+	  }
+	  guard
+		let signingData = [header, data]
+		  .map({ Base64URL.encode($0) })
+		  .joined(separator: ".")
+		  .data(using: .utf8)
+	  else {
+		  print("ERROR")
+		  throw WalletError(description: "Failed to generate idToken header.")
+	  }
+	  return signingData
+	}
+	
+	static func getJwtVcPresentation(_ jwt: String, hashingAlg: HashingAlgorithm, signer: SecureAreaSigner, signAlg: JSONWebAlgorithms.SigningAlgorithm, nonce: String, aud: String, didJwk: String) async throws -> JSONWebSignature.JWS? {
+		let digestCreator = DigestCreator(hashingAlgorithm: hashingAlg)
+		guard let hash = digestCreator.hashAndBase64Encode(input: jwt) else { return nil }
+
+		if let asyncSigner = signer as? AsyncSignerProtocol {
+			let kbJWTPayload: JSON = .init([Keys.nonce.rawValue: nonce, Keys.aud.rawValue: aud, Keys.iat.rawValue: Int(Date().timeIntervalSince1970.rounded()), Keys.sdHash.rawValue: hash])
+
+			let protectedHeaderData = try JSONEncoder
+				.jose
+				.encode(
+					DefaultJWSHeaderImpl(algorithm: signAlg, keyID: didJwk)
+				)
+
+			let signingData = try buildSigningData(
+				header: protectedHeaderData,
+				data: kbJWTPayload.rawData()
+			)
+
+		  let signature = try await asyncSigner.signAsync(signingData)
+		  let signedKBJwt = try? JWS(
+			protectedHeaderData: protectedHeaderData,
+			data: kbJWTPayload.rawData(),
+			signature: signature
+		  )
+
+			return signedKBJwt
+		}
+		
+		return nil
+	}
 
 	static func sha256Hash(_ input: String) -> String {
 		let inputData = Array(input.utf8)
@@ -154,12 +212,18 @@ extension ClaimPathElement {
 extension CredentialQuery {
 	public var docType: String? {
 		let metaDocType = meta.dictionaryObject?.first?.value
-		let docType = metaDocType as? String ?? (metaDocType as? [String])?.first
-		return docType
+		if metaDocType is String {
+			return metaDocType as? String
+		} else if let arr = metaDocType as? [Any], let doc_types = arr.first as? [Any], let first = doc_types.first as? String {
+			return first
+		}
+		//,let docType = metaDocType as? String ?? (metaDocType as? [String])?.first
+		return nil
 	}
 
 	public var dataFormat: DocDataFormat {
-		format.format == "mso_mdoc"  ? .cbor : .sdjwt
+		format.format == "mso_mdoc" ? .cbor : format.format == "jwt_vc_json" ? .w3cJwt : .sdjwt
+		//format.format == "mso_mdoc"  ? .cbor : .sdjwt
 	}
 }
 

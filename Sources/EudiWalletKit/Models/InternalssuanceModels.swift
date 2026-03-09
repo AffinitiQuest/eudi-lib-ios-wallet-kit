@@ -25,6 +25,7 @@ struct CredentialConfiguration: Codable, Sendable {
 	let credentialIssuerIdentifier: String
     let docType: String?
 	let vct: String?
+	let docTypes: [String]?
     let scope: String?
 	let supportsAttestationProofType: Bool
 	let supportsJwtProofTypeWithAttestation: Bool
@@ -39,11 +40,12 @@ struct CredentialConfiguration: Codable, Sendable {
 	var batchSize: Int?
 	let defaultCredentialOptions: CredentialOptions
 
-	init(configurationIdentifier: CredentialConfigurationIdentifier, credentialIssuerIdentifier: String, docType: String? = nil, vct: String? = nil, scope: String? = nil, supportsAttestationProofType: Bool, supportsJwtProofTypeWithAttestation: Bool, supportsJwtProofTypeWithoutAttestation: Bool,  credentialSigningAlgValuesSupported: [String], dpopSigningAlgValuesSupported: [String]?, clientAttestationPopSigningAlgValuesSupported: [String]?, issuerDisplay: [DisplayMetadata], display: [DisplayMetadata], claims: [Claim], format: DocDataFormat, defaultCredentialOptions: CredentialOptions) {
+	init(configurationIdentifier: CredentialConfigurationIdentifier, credentialIssuerIdentifier: String, docType: String? = nil, vct: String? = nil, docTypes: [String]?, scope: String? = nil, supportsAttestationProofType: Bool, supportsJwtProofTypeWithAttestation: Bool, supportsJwtProofTypeWithoutAttestation: Bool,  credentialSigningAlgValuesSupported: [String], dpopSigningAlgValuesSupported: [String]?, clientAttestationPopSigningAlgValuesSupported: [String]?, issuerDisplay: [DisplayMetadata], display: [DisplayMetadata], claims: [Claim], format: DocDataFormat, defaultCredentialOptions: CredentialOptions) {
 		self.configurationIdentifier = configurationIdentifier
 		self.credentialIssuerIdentifier = credentialIssuerIdentifier
 		self.docType = docType
 		self.vct = vct
+		self.docTypes = docTypes
 		self.scope = scope
 		self.supportsAttestationProofType = supportsAttestationProofType
 		self.supportsJwtProofTypeWithAttestation = supportsJwtProofTypeWithAttestation

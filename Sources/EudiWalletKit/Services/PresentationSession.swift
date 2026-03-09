@@ -89,6 +89,12 @@ public final class PresentationSession: @unchecked Sendable, ObservableObject {
 					let sdJwtElements = signedSdJwt.extractSdJwtElements(docId: docId, vct: docType, displayName: docPresentInfo.displayName, docClaims: docPresentInfo.docClaims, itemsRequested: sdItemsRequested)
 					guard let sdJwtElements else { continue }
 					disclosedDocuments.append(.sdJwt(sdJwtElements))
+				case .w3cJwt:
+					guard case let .w3cJwt(jwtString) = docPresentInfo.typedData else { continue }
+					guard let w3cItemsRequested = request.itemsRequested[docId] ?? request.itemsRequested[docType] else { continue }
+					let w3cElements = jwtString.extractW3CJwtElements(docId: docId, fallbackDocType: docType, displayName: docPresentInfo.displayName, docClaims: docPresentInfo.docClaims, itemsRequested: w3cItemsRequested)
+					guard let w3cElements else { continue }
+					disclosedDocuments.append(.w3cJwt(w3cElements))
 				default: logger.error("Unsupported format \(docPresentInfo.docDataFormat) for \(docId)")
 			}
 

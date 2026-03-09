@@ -417,7 +417,7 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 		guard var docs = try await storage.storageService.loadDocuments(status: .issued), docs.count > 0 else {
 			throw PresentationSession.makeError(str: PresentationSession.NotAvailableStr, localizationKey: "request_data_no_document")
 		}
-		if let format { docs = docs.filter { $0.docDataFormat == format } }
+		//if let format { docs = docs.filter { $0.docDataFormat == format } }
 		let idsToDocData = docs.compactMap { $0.getDataForTransfer() }
 		var docKeyInfos = Dictionary(uniqueKeysWithValues: idsToDocData.map(\.docKeyInfo))
 		var docData = Dictionary(uniqueKeysWithValues: idsToDocData.map(\.doc))
@@ -451,7 +451,7 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 	/// - Returns: A presentation session instance,
 	public func beginPresentation(flow: FlowType, sessionTransactionLogger: (any TransactionLogger)? = nil) async -> PresentationSession {
 		do {
-			let (parameters, documents) = try await prepareServiceDataParameters(format: flow == .ble ? .cbor : nil)
+			let (parameters, documents) = try await prepareServiceDataParameters(format: nil)//flow == .ble ? .cbor : nil)
 			let docIdToPresentInfo = try await storage.getDocIdsToPresentInfo(documents: documents)
 			switch flow {
 			case .ble:

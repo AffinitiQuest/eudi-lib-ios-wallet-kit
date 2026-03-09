@@ -134,6 +134,7 @@ public final class StorageManager: ObservableObject, @unchecked Sendable {
 		switch doc.docDataFormat {
 		case .cbor:	toCborMdocModel(doc: doc, uiCulture: uiCulture, modelFactory: modelFactory)
 		case .sdjwt: toSdJwtDocModel(doc: doc, uiCulture: uiCulture, modelFactory: modelFactory)
+		case .w3cJwt: toW3cJwtDocModel(doc: doc, uiCulture: uiCulture, modelFactory: modelFactory)
 		}
 	}
 
@@ -169,6 +170,30 @@ public final class StorageManager: ObservableObject, @unchecked Sendable {
 		let validUntil: Date? = if case let .date(s) = docClaims.first(where: { $0.name == JWTClaimNames.expirationTime})?.dataValue { ISO8601DateFormatter().date(from: s) } else { nil }
 		let statusIdentifier: StatusIdentifier? = if let sd = recreatedClaims.json["status"].dictionary, let sld = sd["status_list"]?.dictionary, let uri = sld["uri"]?.string, let idx = sld["idx"]?.int32 { StatusIdentifier(idx: Int(idx), uriString: uri) } else { nil }
 		return GenericMdocModel(id: doc.id, createdAt: doc.createdAt, docType: doc.docType ?? type, displayName: docMetadata?.getDisplayName(uiCulture), display: docMetadata?.display, issuerDisplay: docMetadata?.issuerDisplay, credentialIssuerIdentifier: md?.credentialIssuerIdentifier, configurationIdentifier: md?.configurationIdentifier, validFrom: validFrom, validUntil: validUntil, statusIdentifier: statusIdentifier, credentialsUsageCounts: nil, credentialPolicy: docKeyInfo.credentialPolicy, secureAreaName: docKeyInfo.secureAreaName, modifiedAt: doc.modifiedAt, docClaims: docClaims, docDataFormat: .sdjwt, hashingAlg: recreatedClaims.hashingAlg)
+	}
+
+	public static func toW3cJwtDocModel(doc: WalletStorage.Document, uiCulture: String?, modelFactory: (any DocClaimsDecodableFactory)? = nil) -> (any DocClaimsDecodable)? {
+		guard let jwtString = String(data: doc.data, encoding: .utf8) else { return nil }
+		let (_, payload, _) = extractJWTParts(jwtString)
+		guard !payload.isEmpty,
+			  let payloadData = Data(base64URLEncoded: payload),
+			  let payloadJson = try? JSON(data: payloadData) else { return nil }
+		let docMetadata: DocMetadata? = DocMetadata(from: doc.metadata)
+		let docKeyInfo = DocKeyInfo(from: doc.docKeyInfo) ?? .default
+		let md = docMetadata?.getMetadata(uiCulture: uiCulture)
+		// credentialSubject may be nested under "vc" (JWT-VC) or at top level
+		let vcJson = payloadJson["vc"]
+		let credentialSubjectJson = vcJson.type != .null ? vcJson["credentialSubject"] : payloadJson["credentialSubject"]
+		var docClaims = [DocClaim]()
+		if credentialSubjectJson.type != .null, let cs = credentialSubjectJson.toClaimsArray(pathPrefix: [], md?.claimMetadata, uiCulture)?.0 {
+			docClaims.append(contentsOf: cs)
+		}
+		// type comes from vc.type array; fall back to stored docType
+		let typeArray = (vcJson.type != .null ? vcJson["type"] : payloadJson["type"]).arrayValue.compactMap { $0.string }
+		let docType = doc.docType ?? typeArray.last
+		let validFrom: Date? = if let iat = payloadJson["iat"].double { Date(timeIntervalSince1970: iat) } else { nil }
+		let validUntil: Date? = if let exp = payloadJson["exp"].double { Date(timeIntervalSince1970: exp) } else { nil }
+		return GenericMdocModel(id: doc.id, createdAt: doc.createdAt, docType: docType, displayName: docMetadata?.getDisplayName(uiCulture), display: docMetadata?.display, issuerDisplay: docMetadata?.issuerDisplay, credentialIssuerIdentifier: md?.credentialIssuerIdentifier, configurationIdentifier: md?.configurationIdentifier, validFrom: validFrom, validUntil: validUntil, statusIdentifier: nil, credentialsUsageCounts: nil, credentialPolicy: docKeyInfo.credentialPolicy, secureAreaName: docKeyInfo.secureAreaName, modifiedAt: doc.modifiedAt, docClaims: docClaims, docDataFormat: .w3cJwt, hashingAlg: nil)
 	}
 
 	public static func getHashingAlgorithm(doc: WalletStorage.Document) -> String? {
@@ -210,8 +235,9 @@ public final class StorageManager: ObservableObject, @unchecked Sendable {
 			let bValid = (try? await hasAnyCredential(id: m.id)) ?? false
 			guard bValid else { return nil }
 			let docTypedData: DocTypedData? = switch m.docDataFormat {
-				case .cbor: if let iss = try? IssuerSigned(data: doc.data.bytes) { .msoMdoc(iss) } else { nil }
-				case .sdjwt: if let serString = String(data: doc.data, encoding: .utf8), let sd = try? CompactParser().getSignedSdJwt(serialisedString: serString) { .sdJwt(sd) } else { nil }
+			case .cbor: if let iss = try? IssuerSigned(data: doc.data.bytes) { .msoMdoc(iss) } else { nil }
+			case .sdjwt: if let serString = String(data: doc.data, encoding: .utf8), let sd = try? CompactParser().getSignedSdJwt(serialisedString: serString) { .sdJwt(sd) } else { nil }
+			case .w3cJwt: if let serString = String(data: doc.data, encoding: .utf8) { .w3cJwt(serString) } else { nil }
 			}
 			guard let docTypedData else { return nil }
 			let presentInfo = DocPresentInfo(docType: m.docType!, secureAreaName: dki.secureAreaName, docDataFormat: m.docDataFormat, displayName: m.displayName, docClaims: m.docClaims, typedData: docTypedData)

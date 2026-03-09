@@ -32,11 +32,13 @@ public struct DocPresentInfo: Sendable {
 public enum DocElements: Identifiable, Sendable {
 	case msoMdoc(MsoMdocElements)
 	case sdJwt(SdJwtElements)
+	case w3cJwt(W3CJwtElements)
 
 	public var id: String {
 	 switch self {
 	 case .msoMdoc(let element): return element.id
 	 case .sdJwt(let element): return element.id
+	 case .w3cJwt(let e):  return e.id
 	 }
 	}
 
@@ -46,6 +48,9 @@ public enum DocElements: Identifiable, Sendable {
 	public var sdJwt: SdJwtElements? {
 		if case .sdJwt(let sd) = self { return sd } else { return nil }
 	}
+	public var w3cJwt: W3CJwtElements? {
+		if case .w3cJwt(let w3c) = self { return w3c } else { return nil }
+	}
 
 	public var isMsoMdoc: Bool {
 		if case .msoMdoc(_) = self { return true } else { return false }
@@ -53,28 +58,35 @@ public enum DocElements: Identifiable, Sendable {
 	public var isSdJwt: Bool {
 		if case .sdJwt(_) = self { return true } else { return false }
 	}
+	public var isW3CJwt: Bool {
+		if case .w3cJwt(_) = self { return true } else { return false }
+	}
 	public var docTypeOrVct: String {
 		switch self {
 		case .msoMdoc(let mdoc): return mdoc.docType
 		case .sdJwt(let sdJwt): return sdJwt.vct
+		case .w3cJwt(let w3cJwt): return w3cJwt.types.last ?? ""
 		}
 	}
 	public var isValid: Bool {
 		switch self {
 		case .msoMdoc(let mdoc): return mdoc.isValid
 		case .sdJwt(let sdJwt): return sdJwt.isValid
+		case .w3cJwt(let w3cJwt): return w3cJwt.isValid
 		}
 	}
 	public var docId: String {
 		switch self {
 		case .msoMdoc(let mdoc): return mdoc.docId
 		case .sdJwt(let sdJwt): return sdJwt.docId
+		case .w3cJwt(let w3cJwt): return w3cJwt.docId
 		}
 	}
 	public var selectedItemsDictionary: [String: [RequestItem]] {
 		switch self {
 		case .msoMdoc(let mdoc): return mdoc.selectedItemsDictionary
 		case .sdJwt(let sdJwt): return sdJwt.selectedItemsDictionary
+		case .w3cJwt(let w3cJwt): return w3cJwt.selectedItemsDictionary
 		}
 	}
 }
@@ -125,6 +137,31 @@ public final class SdJwtElements: Identifiable, @unchecked Sendable {
 
 	public var selectedItemsDictionary: [String: [RequestItem]] {
 		["": sdJwtElements.filter(\.isValidAndSelected).flatMap(\.selectedRequestItems)]
+	}
+}
+
+/// Element collection for a W3C JWT-VC credential.
+/// Unlike SD-JWT, JWT-VC has no selective disclosure — all claims in `credentialSubject` are plaintext.
+/// The `types` array mirrors the `type` field in the JWT payload (e.g. `["VerifiableCredential", "UniversityDegreeCredential"]`).
+public final class W3CJwtElements: Identifiable, @unchecked Sendable {
+	public init(docId: String, types: [String], displayName: String? = nil, isValid: Bool = true, elements: [SdJwtElement]) {
+		self.docId = docId
+		self.types = types
+		self.displayName = displayName
+		self.isValid = isValid
+		self.elements = elements
+	}
+
+	public var id: String { docId }
+	public var docId: String
+	/// Full type array from the JWT `type` field, e.g. ["VerifiableCredential", "UniversityDegreeCredential"]
+	public let types: [String]
+	public let displayName: String?
+	public var isValid: Bool = true
+	public var elements: [SdJwtElement]
+
+	public var selectedItemsDictionary: [String: [RequestItem]] {
+		["": elements.filter(\.isValidAndSelected).flatMap(\.selectedRequestItems)]
 	}
 }
 
@@ -207,6 +244,49 @@ extension RequestItem {
 
 	static func findDocClaimByName(_ docClaims: [DocClaim], name: String) -> DocClaim? {
 		docClaims.first { $0.name == name }
+	}
+}
+
+extension String {
+	/// Extracts W3C JWT-VC claims from a raw JWT string.
+	/// JWT-VC stores all claims in plaintext under `vc.credentialSubject` — no selective disclosure.
+	/// `itemsRequested` uses the empty-string namespace key (`""`) with dot-notation paths into `credentialSubject`.
+	/// `fallbackDocType` is used as the sole entry in `types` when the JWT payload does not contain a `type` array.
+	public func extractW3CJwtElements(docId: String, fallbackDocType: String, displayName: String?, docClaims: [DocClaim], itemsRequested: [NameSpace: [RequestItem]]) -> W3CJwtElements? {
+		// Decode the JWT payload (second Base64URL segment)
+		let parts = split(separator: ".", omittingEmptySubsequences: false)
+		guard parts.count >= 2,
+			  let payloadData = Data(base64URLEncoded: String(parts[1])),
+			  let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any] else { return nil }
+		// Extract the type array from `vc.type` (JWT-VC spec) or fall back to the stored docType string
+		let vcObject = payload["vc"] as? [String: Any]
+		let types = vcObject?["type"] as? [String] ?? [fallbackDocType]
+		// Claims live under `vc.credentialSubject` (JWT-VC) or directly in `credentialSubject` (some issuers)
+		let credentialSubject = vcObject?["credentialSubject"] as? [String: Any]
+			?? payload["credentialSubject"] as? [String: Any]
+			?? [:]
+		let allPaths = OrderedSet(docClaims.flatMap(\.claimPaths))
+		let isMandatory: (RequestItem) -> Bool = { if let o = $0.isOptional { !o } else { false } }
+		let itemsReq = itemsRequested[""] ?? allPaths.map { RequestItem(elementPath: $0.value.map(\.claimName)) }
+		var elements = itemsReq.map { reqItem -> SdJwtElement in
+			let requestPath = reqItem.elementPath
+			let docClaim: DocClaim? = reqItem.findDocClaimByPath(docClaims: docClaims, requestPath: requestPath)
+			// Walk the credentialSubject dict to find the value at the claim path
+			var node: Any? = credentialSubject
+			for key in requestPath { node = (node as? [String: Any])?[key] }
+			let stringValue = node.map { "\($0)" } ?? docClaim?.stringValue
+			let isValid = node != nil
+			return SdJwtElement(elementPath: requestPath, isOptional: !isMandatory(reqItem), intentToRetain: reqItem.intentToRetain ?? false, stringValue: stringValue, docClaim: docClaim, isValid: isValid, nestedElements: nil)
+		}
+		// De-duplicate root elements and attach nested children (mirrors SD-JWT logic)
+		var rootElements = [SdJwtElement]()
+		for el in elements where el.elementPath.count == 1 { if !rootElements.contains(el) { rootElements.append(el) } }
+		for nested in elements.filter({ $0.elementPath.count > 1 }) {
+			guard let parent = rootElements.first(where: { $0.elementPath == [nested.elementPath[0]] }) else { continue }
+			if parent.nestedElements == nil { parent.nestedElements = [] }
+			parent.nestedElements!.append(nested)
+		}
+		return W3CJwtElements(docId: docId, types: types, displayName: displayName, elements: rootElements)
 	}
 }
 

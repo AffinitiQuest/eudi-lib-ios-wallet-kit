@@ -30,6 +30,27 @@ import Logging
 import X509
 import struct OpenID4VP.ClaimPath
 import enum OpenID4VP.ClaimPathElement
+import SwiftyJSON
+
+public struct JWTVPProof: Codable {
+	var type: String
+	var proofPurpose: String
+	var jws: String
+}
+
+public struct JWTVerifiablePresentation: Codable {
+	var context: [String]
+	var type: [String]
+	var vp: [String: [String]]
+	var proof: JWTVPProof
+
+	enum CodingKeys: String, CodingKey, CaseIterable {
+		case context = "@context"
+		case type
+		case vp
+		case proof
+	}
+}
 /// Implements remote attestation presentation to online verifier
 
 /// Implementation is based on the OpenID4VP specification
@@ -48,6 +69,7 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 	var idsToDocTypes: [String: String]!
 	// map of document-id to SignedSDJWT
 	var docsSdJwt: [String: SignedSDJWT]!
+	var docsW3cJwt: [String: String]!
 	var dcqlQueryable: DefaultDcqlQueryable!
 	// map of document-id to hashing algorithm
 	var docsHashingAlgs: [String: String]!
@@ -197,6 +219,8 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 		let parser = CompactParser()
 		let docStrings = docs.filter { k,v in Self.filterFormat(dataFormats[k]!, fmt: .sdjwt)}.compactMapValues { String(data: $0, encoding: .utf8) }
 		docsSdJwt = docStrings.compactMapValues { try? parser.getSignedSdJwt(serialisedString: $0) }
+		let w3cJwtDocStrings = docs.filter { k,v in Self.filterFormat(dataFormats[k]!, fmt: .w3cJwt)}.compactMapValues { String(data: $0, encoding: .utf8) }
+		docsW3cJwt = w3cJwtDocStrings.compactMapValues { $0 }
 		// make dcqlQueryable
 		var credentialMap = [String: (String, DocDataFormat)]()
 		for (docId, docType) in idsToDocTypes {
@@ -231,6 +255,21 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 			}
 			claimPaths[docId] = paths
 			claimValues[docId] = values
+		}
+		for (docId, jwtVc) in docsW3cJwt ?? [:] {
+			if let decodedJwt = JWTDecoder.decodeW3cJwt(jwtVc) {
+				let vc = decodedJwt.dictionaryObject?["vc"] as? [String: Any]
+				paths.removeAll(); values.removeAll()
+				if let credentialSubject = vc?["credentialSubject"] as? [String: Any] {
+					for (path, value) in credentialSubject {
+						logger.info("IssuerSigned document \(docId) path \(path) value: \(value)")
+						paths.append(ClaimPath([.claim(name: String(path))]))
+						values[paths.last!] = [(value as? String) ?? ""]
+					}
+				}
+				claimPaths[docId] = paths
+				claimValues[docId] = values
+			}
 		}
 		dcqlQueryable = DefaultDcqlQueryable(credentials: credentialMap, claimPaths: claimPaths, claimValues: claimValues)
 	}
@@ -274,7 +313,30 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 					continue
 				}
 				inputToPresentations.append((inputDescrId, docId, VerifiablePresentation.generic(presented.serialisation)))
-			}
+			} else if dataFormats[docId] == .w3cJwt {
+				   let docSigned = docsW3cJwt[docId]; let dpk = privateKeyObjects[docId]
+				   guard let docSigned, let dpk, let items = nsItems.first?.value else { continue }
+				   let unlockData = try await dpk.secureArea.unlockKey(id: docId)
+				   let keyInfo = try await dpk.secureArea.getKeyBatchInfo(id: docId);	let dsa = keyInfo.crv.defaultSigningAlgorithm
+				   let signer = try SecureAreaSigner(secureArea: dpk.secureArea, id: docId, index: dpk.index, ecAlgorithm: dsa, unlockData: unlockData)
+				   let signAlg = try SecureAreaSigner.getSigningAlgorithm(dsa)
+				   let hai = HashingAlgorithmIdentifier(rawValue: docsHashingAlgs[docId] ?? "") ?? .SHA3256
+				   let publicKey = try await dpk.secureArea.getPublicKey(id: docId, index: dpk.index, curve: .P256)
+				   let publicKeyJwk = try publicKey.toSecKey().jwk
+				   var didJwk = ""
+				   if let jsonData = try publicKey.toDictionary().jsonData {
+					   didJwk = "did:jwk:\(jsonData.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: ""))#0"
+				   }
+				   guard let idToken = try await OpenId4VpUtils.getJwtVcPresentation(docSigned, hashingAlg: hai.hashingAlgorithm(), signer: signer, signAlg: signAlg, nonce: vpNonce, aud: vpClientId, didJwk: didJwk) else {
+					   continue
+				   }
+
+				   let verifiablePresentation: JWTVerifiablePresentation = JWTVerifiablePresentation(context: ["https://www.w3.org/2018/credentials/v1"], type: ["VerifiablePresentation"], vp: ["verifiableCredential": [docSigned]], proof: JWTVPProof(type: "ES256", proofPurpose: "authentication", jws: idToken.compactSerialization))
+
+				   let jsonData = try JSONEncoder().encode(verifiablePresentation)
+				   let jsonVP = try JSON.init(jsonData)
+				   inputToPresentations.append((inputDescrId, docId, VerifiablePresentation.json(jsonVP)))
+			   }
 		}
 		try await SendVpTokens(inputToPresentations, dcql, resolved, onSuccess)
 
@@ -358,6 +420,7 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 				case .x509Hash: .x509Hash(trust: chainVerifier)
 				case .x509SanDns: .x509SanDns(trust: chainVerifier)
 				case .preregistered(let clients): .preregistered(clients: Dictionary(uniqueKeysWithValues: clients.map { ($0.clientId, $0) }))
+			case .decentralizedIdentifier: .decentralizedIdentifier(lookup: DidResolver())
 			}
 		}
 		let res = OpenId4VPConfiguration(privateKey: privateKey, publicWebKeySet: keySet, supportedClientIdSchemes: supportedClientIdPrefixes, vpFormatsSupported: [], jarConfiguration: .encryptionOption, vpConfiguration: .default(), errorDispatchPolicy: .allClients, session: networking, responseEncryptionConfiguration: openID4VpConfig.responseEncryptionConfiguration ?? .default())

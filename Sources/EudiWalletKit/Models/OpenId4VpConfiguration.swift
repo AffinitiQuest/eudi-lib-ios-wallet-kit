@@ -57,6 +57,13 @@ public enum ClientIdScheme: Sendable {
     /// The client identifier must match or be associated with a valid redirect URI
     /// that the verifier is authorized to use.
     case redirectUri
+	
+	/// Client identifier scheme using redirect URI validation.
+	///
+	/// This scheme validates verifiers based on their registered redirect URIs.
+	/// The client identifier must match or be associated with a valid redirect URI
+	/// that the verifier is authorized to use.
+	case decentralizedIdentifier
 }
 
 /// Configuration for OpenID4VP (OpenID for Verifiable Presentations) protocol.
