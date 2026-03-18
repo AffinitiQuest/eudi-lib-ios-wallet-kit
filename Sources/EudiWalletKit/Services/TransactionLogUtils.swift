@@ -44,8 +44,17 @@ class TransactionLogUtils {
 			guard let dr = try? DeviceResponse(data: raw.bytes) else { return [] }
 			for (index, doc) in (dr.documents ?? []).enumerated() {
 				let docMetadata = transactionLog.docMetadata?[index]
-				if let docDecodable = parseCBORDocClaimsDecodable(id: UUID().uuidString, docType: doc.docType, issuerSigned: doc.issuerSigned, metadata: docMetadata, uiCulture: uiCulture) {
-					res.append(docDecodable)
+				switch doc {
+				case .cbor(let d):
+					if let docDecodable = parseCBORDocClaimsDecodable(id: UUID().uuidString, docType: d.docType, issuerSigned: d.issuerSigned, metadata: docMetadata, uiCulture: uiCulture) {
+						res.append(docDecodable)
+					}
+				case .sdJwt(let d):
+					if let docDecodable = parseSdJwtDocClaimsDecodable(id: UUID().uuidString, docType: d.docType, sdJwtSerialized: d.sdJwt, metadata: docMetadata, uiCulture: uiCulture) {
+						res.append(docDecodable)
+					}
+				case .w3cJwt:
+					break
 				}
 			}
 		} else if transactionLog.dataFormat == .json {
@@ -70,7 +79,7 @@ class TransactionLogUtils {
 	static func parseDocClaimDecodable(_ presentedStr: String, dataFormat: DocDataFormat, metadata: Data?, uiCulture: String?) -> (any DocClaimsDecodable)? {
 		if dataFormat == .cbor {
 			guard let isd = Data(base64urlEncoded: presentedStr) ?? Data(base64Encoded: presentedStr) else { return nil }
-			let iss = if let dr = try? DeviceResponse(data: isd.bytes) { dr.documents?.first?.issuerSigned } else { try? IssuerSigned(data: isd.bytes) }
+			let iss: IssuerSigned? = if let dr = try? DeviceResponse(data: isd.bytes), case .cbor(let d) = dr.documents?.first { d.issuerSigned } else { try? IssuerSigned(data: isd.bytes) }
 			guard let iss else { return nil}
 			if let docDecodable = parseCBORDocClaimsDecodable(id: UUID().uuidString, docType: iss.issuerAuth.mso.docType, issuerSigned: iss, metadata: metadata, uiCulture: uiCulture) { return docDecodable }
 		} else if dataFormat == .sdjwt {

@@ -170,6 +170,14 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 		return try await vciService.getIssuerMetadata()
 	}
 
+	/// Returns cached issuer metadata for an offer URI without making a network request.
+	/// Must be called after ``resolveOfferUrlDocTypes(offerUri:authFlowRedirectionURI:)``
+	/// - Parameter offerUri: The offer URI used when resolving the offer
+	/// - Returns: The cached ``CredentialIssuerMetadata``, or nil if not yet resolved
+	public func getCachedIssuerMetadata(offerUri: String) -> CredentialIssuerMetadata? {
+		OpenId4VCIService.credentialOfferCache[offerUri]?.credentialIssuerMetadata
+	}
+
 	/// Issue multiple documents using OpenId4Vci protocol
 	///
 	/// If ``userAuthenticationRequired`` is true, user authentication is required. The authentication prompt message has localisation key "issue_document"

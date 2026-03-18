@@ -152,35 +152,58 @@ class OpenId4VpUtils {
 	  return signingData
 	}
 	
-	static func getJwtVcPresentation(_ jwt: String, hashingAlg: HashingAlgorithm, signer: SecureAreaSigner, signAlg: JSONWebAlgorithms.SigningAlgorithm, nonce: String, aud: String, didJwk: String) async throws -> JSONWebSignature.JWS? {
-		let digestCreator = DigestCreator(hashingAlgorithm: hashingAlg)
-		guard let hash = digestCreator.hashAndBase64Encode(input: jwt) else { return nil }
+	/// Build and sign a VP JWT for `jwt_vc_json` format per OID4VP 1.0 §8.
+	///
+	/// The VP JWT IS the key-binding proof — the holder signs a JWT whose payload embeds the raw
+	/// issued VC JWT in `vp.verifiableCredential[]` and binds the presentation to the request via
+	/// `nonce` and `aud`. There is no separate proof object.
+	///
+	/// - Parameters:
+	///   - vcJwt: The raw compact VC JWT string to present.
+	///   - signer: The holder's secure-area signer.
+	///   - signAlg: Signing algorithm (e.g. ES256).
+	///   - nonce: The nonce from the Authorization Request (replay protection).
+	///   - aud: The Verifier's client_id.
+	///   - holderDid: The holder's DID (used as `iss`; fragment stripped automatically).
+	/// - Returns: The compact VP JWT string, or nil if the signer does not support async signing.
+	static func getJwtVcPresentation(_ vcJwt: String, signer: SecureAreaSigner, signAlg: JSONWebAlgorithms.SigningAlgorithm, nonce: String, aud: String, holderDid: String) async throws -> String? {
+		guard let asyncSigner = signer as? AsyncSignerProtocol else { return nil }
 
-		if let asyncSigner = signer as? AsyncSignerProtocol {
-			let kbJWTPayload: JSON = .init([Keys.nonce.rawValue: nonce, Keys.aud.rawValue: aud, Keys.iat.rawValue: Int(Date().timeIntervalSince1970.rounded()), Keys.sdHash.rawValue: hash])
+		let now = Int(Date().timeIntervalSince1970.rounded())
+		let issuer = holderDid.components(separatedBy: "#").first ?? holderDid
+		let jti = "urn:uuid:\(UUID().uuidString.lowercased())"
 
-			let protectedHeaderData = try JSONEncoder
-				.jose
-				.encode(
-					DefaultJWSHeaderImpl(algorithm: signAlg, keyID: didJwk)
-				)
+		let vpPayload: [String: Any] = [
+			Keys.iss.rawValue: issuer,
+			Keys.aud.rawValue: aud,
+			Keys.iat.rawValue: now,
+			"exp": now + 300,
+			Keys.nonce.rawValue: nonce,
+			"jti": jti,
+			"vp": [
+				"@context": ["https://www.w3.org/2018/credentials/v1"],
+				"type": ["VerifiablePresentation"],
+				"verifiableCredential": [vcJwt]
+			] as [String: Any]
+		]
 
-			let signingData = try buildSigningData(
-				header: protectedHeaderData,
-				data: kbJWTPayload.rawData()
-			)
+		let payloadData = try JSONSerialization.data(withJSONObject: vpPayload)
 
-		  let signature = try await asyncSigner.signAsync(signingData)
-		  let signedKBJwt = try? JWS(
+		var protectedHeaderData = try JSONEncoder.jose.encode(
+			DefaultJWSHeaderImpl(algorithm: signAlg, keyID: holderDid)
+		)
+		var headerDict = try JSONSerialization.jsonObject(with: protectedHeaderData) as? [String: Any] ?? [:]
+		headerDict["typ"] = "JWT"
+		protectedHeaderData = try JSONSerialization.data(withJSONObject: headerDict)
+
+		let signingData = try buildSigningData(header: protectedHeaderData, data: payloadData)
+		let signature = try await asyncSigner.signAsync(signingData)
+		let signedVpJwt = try JWS(
 			protectedHeaderData: protectedHeaderData,
-			data: kbJWTPayload.rawData(),
+			data: payloadData,
 			signature: signature
-		  )
-
-			return signedKBJwt
-		}
-		
-		return nil
+		)
+		return signedVpJwt.compactSerialization
 	}
 
 	static func sha256Hash(_ input: String) -> String {
@@ -216,13 +239,15 @@ extension CredentialQuery {
 			return metaDocType as? String
 		} else if let arr = metaDocType as? [Any], let doc_types = arr.first as? [Any], let first = doc_types.first as? String {
 			return first
+		} else if let vct_types = metaDocType as? [String] {
+			return vct_types.first
 		}
 		//,let docType = metaDocType as? String ?? (metaDocType as? [String])?.first
 		return nil
 	}
 
 	public var dataFormat: DocDataFormat {
-		format.format == "mso_mdoc" ? .cbor : format.format == "jwt_vc_json" ? .w3cJwt : .sdjwt
+		format.format == "mso_mdoc" ? .cbor : format.format == "jwt_vc_json" || format.format == "vc+jwt" ? .w3cJwt : .sdjwt
 		//format.format == "mso_mdoc"  ? .cbor : .sdjwt
 	}
 }

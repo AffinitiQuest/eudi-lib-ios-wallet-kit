@@ -32,23 +32,15 @@ import struct OpenID4VP.ClaimPath
 import enum OpenID4VP.ClaimPathElement
 import SwiftyJSON
 
-public struct JWTVPProof: Codable {
-	var type: String
-	var proofPurpose: String
-	var jws: String
-}
-
 public struct JWTVerifiablePresentation: Codable {
 	var context: [String]
 	var type: [String]
-	var vp: [String: [String]]
-	var proof: JWTVPProof
+	var verifiableCredential: [String]
 
-	enum CodingKeys: String, CodingKey, CaseIterable {
+	enum CodingKeys: String, CodingKey {
 		case context = "@context"
 		case type
-		case vp
-		case proof
+		case verifiableCredential
 	}
 }
 /// Implements remote attestation presentation to online verifier
@@ -314,29 +306,22 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 				}
 				inputToPresentations.append((inputDescrId, docId, VerifiablePresentation.generic(presented.serialisation)))
 			} else if dataFormats[docId] == .w3cJwt {
-				   let docSigned = docsW3cJwt[docId]; let dpk = privateKeyObjects[docId]
-				   guard let docSigned, let dpk, let items = nsItems.first?.value else { continue }
-				   let unlockData = try await dpk.secureArea.unlockKey(id: docId)
-				   let keyInfo = try await dpk.secureArea.getKeyBatchInfo(id: docId);	let dsa = keyInfo.crv.defaultSigningAlgorithm
-				   let signer = try SecureAreaSigner(secureArea: dpk.secureArea, id: docId, index: dpk.index, ecAlgorithm: dsa, unlockData: unlockData)
-				   let signAlg = try SecureAreaSigner.getSigningAlgorithm(dsa)
-				   let hai = HashingAlgorithmIdentifier(rawValue: docsHashingAlgs[docId] ?? "") ?? .SHA3256
-				   let publicKey = try await dpk.secureArea.getPublicKey(id: docId, index: dpk.index, curve: .P256)
-				   let publicKeyJwk = try publicKey.toSecKey().jwk
-				   var didJwk = ""
-				   if let jsonData = try publicKey.toDictionary().jsonData {
-					   didJwk = "did:jwk:\(jsonData.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: ""))#0"
-				   }
-				   guard let idToken = try await OpenId4VpUtils.getJwtVcPresentation(docSigned, hashingAlg: hai.hashingAlgorithm(), signer: signer, signAlg: signAlg, nonce: vpNonce, aud: vpClientId, didJwk: didJwk) else {
-					   continue
-				   }
-
-				   let verifiablePresentation: JWTVerifiablePresentation = JWTVerifiablePresentation(context: ["https://www.w3.org/2018/credentials/v1"], type: ["VerifiablePresentation"], vp: ["verifiableCredential": [docSigned]], proof: JWTVPProof(type: "ES256", proofPurpose: "authentication", jws: idToken.compactSerialization))
-
-				   let jsonData = try JSONEncoder().encode(verifiablePresentation)
-				   let jsonVP = try JSON.init(jsonData)
-				   inputToPresentations.append((inputDescrId, docId, VerifiablePresentation.json(jsonVP)))
-			   }
+				let docSigned = docsW3cJwt[docId]; let dpk = privateKeyObjects[docId]
+				guard let docSigned, let dpk else { continue }
+				let unlockData = try await dpk.secureArea.unlockKey(id: docId)
+				let keyInfo = try await dpk.secureArea.getKeyBatchInfo(id: docId); let dsa = keyInfo.crv.defaultSigningAlgorithm
+				let signer = try SecureAreaSigner(secureArea: dpk.secureArea, id: docId, index: dpk.index, ecAlgorithm: dsa, unlockData: unlockData)
+				let signAlg = try SecureAreaSigner.getSigningAlgorithm(dsa)
+				let publicKey = try await dpk.secureArea.getPublicKey(id: docId, index: dpk.index, curve: .P256)
+				var holderDid = ""
+				if let jsonData = try publicKey.toDictionary().jsonData {
+					holderDid = "did:jwk:\(jsonData.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: ""))#0"
+				}
+				guard let vpJwt = try await OpenId4VpUtils.getJwtVcPresentation(docSigned, signer: signer, signAlg: signAlg, nonce: vpNonce, aud: vpClientId, holderDid: holderDid) else {
+					continue
+				}
+				inputToPresentations.append((inputDescrId, docId, VerifiablePresentation.generic(vpJwt)))
+			}
 		}
 		try await SendVpTokens(inputToPresentations, dcql, resolved, onSuccess)
 
