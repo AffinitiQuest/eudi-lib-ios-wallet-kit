@@ -755,7 +755,7 @@ public actor OpenId4VCIService {
 	}
 
 	func finalizeIssuing(issueOutcome: IssuanceOutcome, docType: String?, format: DocDataFormat, issueReq: IssueRequest) async throws -> WalletStorage.Document  {
-		var dataToSave: Data; var docTypeToSave: String?
+		var dataToSave: Data; var docTypeToSave: String?; var issuedDocTypes: [String]?
 		var docMetadata: DocMetadata?; var displayName: String?
 		let pds = issueOutcome.pendingOrDeferredStatus
 		var batch: [WalletStorage.Document]?
@@ -768,7 +768,8 @@ public actor OpenId4VCIService {
 			docMetadata = cc.convertToDocMetadata()
 			let docTypeOrVctOrScope = docType ?? cc.docType ?? cc.scope
 			dkInfo.batchSize = dataPair.count
-			docTypeToSave = if format == .cbor, dataToSave.count > 0 { (try IssuerSigned(data: [UInt8](dataToSave))).issuerAuth.mso.docType } else if format == .sdjwt, dataToSave.count > 0 { StorageManager.getVctFromSdJwt(docData: dataToSave) ?? docTypeOrVctOrScope } else if format == .w3cJwt { cc.docTypes?.last ?? "VerifiableCredential" } else { docTypeOrVctOrScope }
+			docTypeToSave = if format == .cbor, dataToSave.count > 0 { (try IssuerSigned(data: [UInt8](dataToSave))).issuerAuth.mso.docType } else if format == .sdjwt, dataToSave.count > 0 { StorageManager.getVctFromSdJwt(docData: dataToSave) ?? docTypeOrVctOrScope } else if format == .w3cJwt { nil } else { docTypeOrVctOrScope }
+			if format == .w3cJwt { issuedDocTypes = cc.docTypes }
 			displayName = cc.display.getName(uiCulture)
 			if dataPair.count > 0 {
 				batch = (0..<dataPair.count).map { WalletStorage.Document(id: issueReq.id, docType: docTypeToSave, docDataFormat: format, data: issueOutcome.getDataToSave(index: $0, format: format), docKeyInfo: nil, createdAt: Date(), metadata: nil, displayName: displayName, status: .issued) }
@@ -786,7 +787,7 @@ public actor OpenId4VCIService {
 			displayName = pendingAuthModel.configuration.display.getName(uiCulture)
 		}
 		let newDocStatus: WalletStorage.DocumentStatus = issueOutcome.isDeferred ? .deferred : (issueOutcome.isPending ? .pending : .issued)
-		let newDocument = WalletStorage.Document(id: issueReq.id, docType: docTypeToSave, docDataFormat: format, data: dataToSave, docKeyInfo: dkInfo.toData(), createdAt: Date(), metadata: docMetadata?.toData(), displayName: displayName, status: newDocStatus)
+		let newDocument = WalletStorage.Document(id: issueReq.id, docType: docTypeToSave, docTypes: issuedDocTypes, docDataFormat: format, data: dataToSave, docKeyInfo: dkInfo.toData(), createdAt: Date(), metadata: docMetadata?.toData(), displayName: displayName, status: newDocStatus)
 		if newDocStatus == .pending { await storage.appendDocModel(newDocument, uiCulture: uiCulture); return newDocument }
 		if newDocStatus == .issued { try await validateIssuedDocuments(newDocument, batch: batch, publicKeys: publicKeys) }
 		try await endIssueDocument(newDocument, batch: batch)

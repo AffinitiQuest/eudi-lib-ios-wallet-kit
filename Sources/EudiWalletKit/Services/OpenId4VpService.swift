@@ -72,6 +72,8 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 	var transactionData: [TransactionData]?
 	/// map of docType to inputDescriptor-id
 	var inputDescriptorMap: [String: String]!
+	/// map of JWT VC docId to matching DCQL query canonical key (for superset-matched credentials)
+	var w3cJwtDocIdToQueryKey: [String: String] = [:]
 	var dauthMethod: DeviceAuthMethod
 	var privateKeyObjects: [String: CoseKeyPrivate]!
 	var logger = Logger(label: "OpenId4VpService")
@@ -215,9 +217,20 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 		docsW3cJwt = w3cJwtDocStrings.compactMapValues { $0 }
 		// make dcqlQueryable
 		var credentialMap = [String: (String, DocDataFormat)]()
+		w3cJwtDocIdToQueryKey = [:]
 		for (docId, docType) in idsToDocTypes {
 			if let format = formatsRequested[docType] {
 				credentialMap[docId] = (docType, format)
+			} else if dataFormats[docId] == .w3cJwt {
+				let credTypes = Set(docType.components(separatedBy: ","))
+				if let (queryKey, format) = formatsRequested.first(where: { key, fmt in
+					guard fmt == .w3cJwt else { return false }
+					let requiredSets = key.components(separatedBy: ";").map { Set($0.components(separatedBy: ",")) }
+					return requiredSets.contains { credTypes.isSuperset(of: $0) }
+				}) {
+					credentialMap[docId] = (docType, format)
+					w3cJwtDocIdToQueryKey[docId] = queryKey
+				}
 			}
 		}
 		var claimPaths = [String: [ClaimPath]]()
@@ -286,7 +299,8 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 		var inputToPresentations = [(String, String?, VerifiablePresentation)]()
 		// support sd-jwt documents
 		for (docId, nsItems) in itemsToSend {
-			guard let docType = idsToDocTypes[docId], let inputDescrId = inputDescriptorMap[docType] else { continue }
+
+			guard let docType = idsToDocTypes[docId], let inputDescrId = inputDescriptorMap[docType] ?? w3cJwtDocIdToQueryKey[docId].flatMap({ inputDescriptorMap[$0] }) else { continue }
 			if dataFormats[docId] == .cbor {
 				if docsCbor == nil { makeCborDocs() }
 				let itemsToSend1 = Dictionary(uniqueKeysWithValues: [(docId, nsItems)])

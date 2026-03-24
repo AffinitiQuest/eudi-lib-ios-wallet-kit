@@ -42,7 +42,14 @@ public class DefaultDcqlQueryable: DcqlQueryable {
 
 	public func getCredential(docOrVctType: String, docDataFormat: DocDataFormat) -> [String] {
 		credentials.filter { _, value in
-			value.docType == docOrVctType && value.format == docDataFormat
+			guard value.format == docDataFormat else { return false }
+			if docDataFormat == .w3cJwt {
+				let available = Set(value.docType.components(separatedBy: ","))
+				let requiredSets = docOrVctType.components(separatedBy: ";")
+					.map { Set($0.components(separatedBy: ",")) }
+				return requiredSets.contains { available.isSuperset(of: $0) }
+			}
+			return value.docType == docOrVctType
 		}.map { $0.key }
 	}
 

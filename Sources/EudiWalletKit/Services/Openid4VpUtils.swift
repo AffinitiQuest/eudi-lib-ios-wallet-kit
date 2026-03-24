@@ -78,7 +78,17 @@ class OpenId4VpUtils {
 	static func getRequestItems(_ credentialMaps: [String: [ClaimsQuery]], idsToDocTypes: [String: String], formatsRequested: [String: DocDataFormat]) -> RequestItems {
 		var requestItems = RequestItems()
 		for (id, claims) in credentialMaps {
-			guard let docType = idsToDocTypes[id], let formatRequested = formatsRequested[docType] else { continue }
+			guard let docType = idsToDocTypes[id] else { continue }
+			var formatRequested = formatsRequested[docType]
+			if formatRequested == nil {
+				let credTypes = Set(docType.components(separatedBy: ","))
+				formatRequested = formatsRequested.first(where: { key, fmt in
+					guard fmt == .w3cJwt else { return false }
+					let requiredSets = key.components(separatedBy: ";").map { Set($0.components(separatedBy: ",")) }
+					return requiredSets.contains { credTypes.isSuperset(of: $0) }
+				})?.value
+			}
+			guard let formatRequested else { continue }
 			var nsItems: [String: [RequestItem]] = [:]
 			for claim in claims {
 				guard let pair =  Self.parseClaim(claim, formatRequested) else { continue }
@@ -237,18 +247,24 @@ extension CredentialQuery {
 		let metaDocType = meta.dictionaryObject?.first?.value
 		if metaDocType is String {
 			return metaDocType as? String
-		} else if let arr = metaDocType as? [Any], let doc_types = arr.first as? [Any], let first = doc_types.first as? String {
-			return first
+		} else if let arr = metaDocType as? [Any], !arr.isEmpty {
+			// jwt_vc_json: type_values is [[String]]. Encode as canonical string:
+			// each inner array sorted+joined with ",", outer arrays joined with ";"
+			let innerArrays = arr.compactMap { $0 as? [Any] }
+			if !innerArrays.isEmpty {
+				let canonical = innerArrays
+					.map { $0.compactMap { $0 as? String }.sorted().joined(separator: ",") }
+					.joined(separator: ";")
+				return canonical.isEmpty ? nil : canonical
+			}
 		} else if let vct_types = metaDocType as? [String] {
 			return vct_types.first
 		}
-		//,let docType = metaDocType as? String ?? (metaDocType as? [String])?.first
 		return nil
 	}
 
 	public var dataFormat: DocDataFormat {
 		format.format == "mso_mdoc" ? .cbor : format.format == "jwt_vc_json" || format.format == "vc+jwt" ? .w3cJwt : .sdjwt
-		//format.format == "mso_mdoc"  ? .cbor : .sdjwt
 	}
 }
 

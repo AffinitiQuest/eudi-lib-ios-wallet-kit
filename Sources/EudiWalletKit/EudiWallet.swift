@@ -445,7 +445,11 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 			throw PresentationSession.makeError(str:  PresentationSession.NotAvailableStr, localizationKey: "request_data_no_document")
 		}
 		let docMetadata = Dictionary(uniqueKeysWithValues: idsToDocData.map(\.metadata))
-		let idsToDocTypes = Dictionary(uniqueKeysWithValues: docs.filter({$0.docType != nil}).map { ($0.id, $0.docType!) })
+		let idsToDocTypes = Dictionary(uniqueKeysWithValues: docs.compactMap { doc -> (String, String)? in
+			if let docType = doc.docType { return (doc.id, docType) }
+			if let docTypes = doc.docTypes, !docTypes.isEmpty { return (doc.id, docTypes.sorted().joined(separator: ",")) }
+			return nil
+		})
 		let docDisplayNames = Dictionary(uniqueKeysWithValues: docs.map { ($0.id, $0.getClaimDisplayNames(eudiWalletConfig.uiCulture)) })
 		let jwtHashingAlgs = Dictionary(uniqueKeysWithValues: docs.map { ($0.id, StorageManager.getHashingAlgorithm(doc: $0))}).compactMapValues { $0 }
 		parameters = InitializeTransferData(dataFormats: Dictionary(uniqueKeysWithValues: idsToDocData.map(\.fmt)), documentData: docData, documentKeyIndexes: documentKeyIndexes, docMetadata: docMetadata, docDisplayNames: docDisplayNames, docKeyInfos: docKeyInfos, trustedCertificates: eudiWalletConfig.trustedReaderCertificates ?? [], deviceAuthMethod: eudiWalletConfig.deviceAuthMethod.rawValue, idsToDocTypes: idsToDocTypes, hashingAlgs: jwtHashingAlgs)
