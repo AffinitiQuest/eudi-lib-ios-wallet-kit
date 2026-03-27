@@ -407,6 +407,26 @@ public actor OpenId4VCIService {
 			let supportsJwtProofTypeWithAttestation = jwtProofType != nil && !supportsJwtProofTypeWithoutAttestation
 
 			return CredentialConfiguration(configurationIdentifier: credential.key, credentialIssuerIdentifier: credentialIssuerIdentifier, docType: nil, vct: sdJwtVc.vct, docTypes: nil, scope: scope,  supportsAttestationProofType: attestProofType != nil, supportsJwtProofTypeWithAttestation: supportsJwtProofTypeWithAttestation,  supportsJwtProofTypeWithoutAttestation: supportsJwtProofTypeWithoutAttestation, credentialSigningAlgValuesSupported: jwtProofType?.algorithms ?? [], dpopSigningAlgValuesSupported: dpopSigningAlgValuesSupported, clientAttestationPopSigningAlgValuesSupported: clientAttestationPopSigningAlgValuesSupported, issuerDisplay: issuerDisplay.map(\.displayMetadata), display: sdJwtVc.credentialMetadata?.display.map(\.displayMetadata) ?? [], claims: sdJwtVc.credentialMetadata?.claims ?? [], format: .sdjwt, defaultCredentialOptions: getDefaultCredentialOptions(batchCredentialIssuance: batchCredentialIssuance))
+		} else if let credential = credentialsSupported.first(where: { if case .w3CJsonLdDataIntegrity(let ldp) = $0.value, docTypes != nil || identifier != nil, ldp.credentialDefinition.type == docTypes || docTypes == nil, $0.key.value == identifier || identifier == nil { true } else { false } }), case let .w3CJsonLdDataIntegrity(ldp) = credential.value {
+			logger.info("LdpVc, cryptographic suites: \(ldp.credentialSigningAlgValuesSupported)")
+			let jwtProofType = ldp.proofTypesSupported?["jwt"]
+			let attestProofType = ldp.proofTypesSupported?["attestation"]
+			let supportsJwtProofTypeWithAttestation = jwtProofType != nil && attestProofType != nil
+			let supportsJwtProofTypeWithoutAttestation = jwtProofType != nil && attestProofType == nil
+			return CredentialConfiguration(configurationIdentifier: credential.key, credentialIssuerIdentifier: credentialIssuerIdentifier, docType: nil, vct: nil,
+				docTypes: ldp.credentialDefinition.type,
+				scope: "",
+				supportsAttestationProofType: attestProofType != nil,
+				supportsJwtProofTypeWithAttestation: supportsJwtProofTypeWithAttestation,
+				supportsJwtProofTypeWithoutAttestation: supportsJwtProofTypeWithoutAttestation,
+				credentialSigningAlgValuesSupported: jwtProofType?.algorithms ?? [],
+				dpopSigningAlgValuesSupported: dpopSigningAlgValuesSupported,
+				clientAttestationPopSigningAlgValuesSupported: clientAttestationPopSigningAlgValuesSupported,
+				issuerDisplay: issuerDisplay.map(\.displayMetadata),
+				display: ldp.credentialMetadata?.display.map(\.displayMetadata) ?? [],
+				claims: ldp.credentialMetadata?.claims ?? [],
+				format: .ldpVc,
+				defaultCredentialOptions: getDefaultCredentialOptions(batchCredentialIssuance: batchCredentialIssuance))
 		} else if let credential =  credentialsSupported.first(where: { if case .w3CSignedJwt(let w3CSignedJwt) = $0.value, docTypes != nil || identifier != nil, w3CSignedJwt.credentialDefinition.type == docTypes || docTypes == nil, $0.key.value == identifier || identifier == nil { true } else { false } }), case let .w3CSignedJwt(w3CSignedJwt) = credential.value, let scope = w3CSignedJwt.scope {
 			logger.info("JwtVc with scope \(scope), cryptographic suites: \(w3CSignedJwt.credentialSigningAlgValuesSupported)")
 			let jwtProofType = w3CSignedJwt.proofTypesSupported?["jwt"]
@@ -450,6 +470,18 @@ public actor OpenId4VCIService {
 					identifier: $0.key.value, displayName: w3CSignedJwt.credentialMetadata?.display.map(\.displayMetadata).getName(uiCulture) ?? w3CSignedJwt.credentialDefinition.type.last ?? "VerifiableCredential",
 					algValuesSupported: w3CSignedJwt.credentialSigningAlgValuesSupported,
 					claims: w3CSignedJwt.credentialMetadata?.claims ?? [],
+					credentialOptions: dco,
+					keyOptions: nil
+				) {
+					(identifier: $0.key, scope: "", offered: offered)
+				}
+				else if case .w3CJsonLdDataIntegrity(let ldp) = $0.value, case let dco = getDefaultCredentialOptions(batchCredentialIssuance: batchCredentialIssuance), case let offered = OfferedDocModel(
+					credentialConfigurationIdentifier: $0.key.value,
+					docTypes: ldp.credentialDefinition.type ?? ["VerifiableCredential"],
+					scope: "",
+					identifier: $0.key.value, displayName: ldp.credentialMetadata?.display.map(\.displayMetadata).getName(uiCulture) ?? ldp.credentialDefinition.type.last ?? "VerifiableCredential",
+					algValuesSupported: ldp.credentialSigningAlgValuesSupported,
+					claims: ldp.credentialMetadata?.claims ?? [],
 					credentialOptions: dco,
 					keyOptions: nil
 				) {
@@ -754,6 +786,106 @@ public actor OpenId4VCIService {
 		}
 	}
 
+	/// Fetch a remote JSON-LD context URL and extract its term map.
+	/// Returns nil on any network or parse error so callers can gracefully skip.
+	private static func fetchRemoteContext(url: URL) async -> [String: String]? {
+		guard let (data, _) = try? await URLSession.shared.data(from: url),
+		      let contextJson = try? JSON(data: data) else { return nil }
+		let contextObj = contextJson["@context"].exists() ? contextJson["@context"] : contextJson
+		guard let dict = contextObj.dictionary else { return nil }
+		var terms: [String: String] = [:]
+		for (term, value) in dict {
+			guard !term.hasPrefix("@") else { continue }
+			if let id = value["@id"].string {
+				terms[term] = id
+			} else if let id = value.string {
+				terms[term] = id
+			}
+		}
+		return terms
+	}
+
+	/// Expand the `type` strings of an LDP-VC credential using its `@context`.
+	///
+	/// Returns a deduplicated array of both raw type strings and their fully expanded IRIs,
+	/// suitable for DCQL `type_values` superset matching. Processes inline context objects
+	/// directly and fetches remote context URLs. W3C well-known URLs are resolved from
+	/// bundled terms without a network call.
+	static func expandLdpVcTypes(credentialJson: JSON) async -> [String] {
+		let rawTypes = credentialJson["type"].arrayValue.compactMap { $0.string }
+		let contextArray = credentialJson["@context"].arrayValue
+
+		// Bundled well-known W3C context terms (covers v1 and v2 URLs)
+		let w3cBundledTerms: [String: String] = [
+			"VerifiableCredential": "https://www.w3.org/2018/credentials#VerifiableCredential",
+			"VerifiablePresentation": "https://www.w3.org/2018/credentials#VerifiablePresentation"
+		]
+		let w3cContextURLs: Set<String> = [
+			"https://www.w3.org/ns/credentials/v2",
+			"https://www.w3.org/2018/credentials/v1",
+			"https://www.w3.org/2018/credentials"
+		]
+
+		// Build merged term map and @vocab by processing @context entries left-to-right
+		var mergedTerms: [String: String] = [:]
+		var vocab: String? = nil
+
+		for entry in contextArray {
+			if let urlStr = entry.string {
+				if w3cContextURLs.contains(urlStr) {
+					mergedTerms.merge(w3cBundledTerms) { _, new in new }
+				} else if let url = URL(string: urlStr),
+				          let remoteTerms = await fetchRemoteContext(url: url) {
+					mergedTerms.merge(remoteTerms) { _, new in new }
+				}
+			} else if let dict = entry.dictionary {
+				if let vocabVal = dict["@vocab"]?.string {
+					vocab = vocabVal
+				}
+				for (term, value) in dict {
+					guard !term.hasPrefix("@") else { continue }
+					if let id = value["@id"].string {
+						mergedTerms[term] = id
+					} else if let id = value.string {
+						mergedTerms[term] = id
+					}
+				}
+			}
+		}
+
+		// Expand each type string and collect both raw and expanded forms
+		var result: [String] = []
+		var seen = Set<String>()
+		func append(_ s: String) { if seen.insert(s).inserted { result.append(s) } }
+
+		for rawType in rawTypes {
+			append(rawType)
+			if let mappedId = mergedTerms[rawType] {
+				if mappedId.hasPrefix("http") {
+					// Already an absolute IRI
+					append(mappedId)
+				} else if mappedId.contains(":") {
+					// Compact IRI — try to expand the prefix
+					let parts = mappedId.split(separator: ":", maxSplits: 1)
+					if parts.count == 2 {
+						let prefix = String(parts[0])
+						let localName = String(parts[1])
+						if let prefixIri = mergedTerms[prefix] {
+							append(prefixIri + localName)
+						} else if let v = vocab {
+							// Prefix not defined — fall back to @vocab + original term name
+							append(v + rawType)
+						}
+					}
+				}
+			} else if let v = vocab {
+				// No explicit mapping — @vocab + term
+				append(v + rawType)
+			}
+		}
+		return result
+	}
+
 	func finalizeIssuing(issueOutcome: IssuanceOutcome, docType: String?, format: DocDataFormat, issueReq: IssueRequest) async throws -> WalletStorage.Document  {
 		var dataToSave: Data; var docTypeToSave: String?; var issuedDocTypes: [String]?
 		var docMetadata: DocMetadata?; var displayName: String?
@@ -768,8 +900,15 @@ public actor OpenId4VCIService {
 			docMetadata = cc.convertToDocMetadata()
 			let docTypeOrVctOrScope = docType ?? cc.docType ?? cc.scope
 			dkInfo.batchSize = dataPair.count
-			docTypeToSave = if format == .cbor, dataToSave.count > 0 { (try IssuerSigned(data: [UInt8](dataToSave))).issuerAuth.mso.docType } else if format == .sdjwt, dataToSave.count > 0 { StorageManager.getVctFromSdJwt(docData: dataToSave) ?? docTypeOrVctOrScope } else if format == .w3cJwt { nil } else { docTypeOrVctOrScope }
+			docTypeToSave = if format == .cbor, dataToSave.count > 0 { (try IssuerSigned(data: [UInt8](dataToSave))).issuerAuth.mso.docType } else if format == .sdjwt, dataToSave.count > 0 { StorageManager.getVctFromSdJwt(docData: dataToSave) ?? docTypeOrVctOrScope } else if format == .w3cJwt { nil } else if format == .ldpVc { nil } else { docTypeOrVctOrScope }
 			if format == .w3cJwt { issuedDocTypes = cc.docTypes }
+			if format == .ldpVc { issuedDocTypes = cc.docTypes }
+			if format == .ldpVc,
+			   let jsonStr = String(data: dataToSave, encoding: .utf8),
+			   let jsonData = jsonStr.data(using: .utf8),
+			   let payloadJson = try? JSON(data: jsonData) {
+				docMetadata?.ldpIRIExpansionStrings = await OpenId4VCIService.expandLdpVcTypes(credentialJson: payloadJson)
+			}
 			displayName = cc.display.getName(uiCulture)
 			if dataPair.count > 0 {
 				batch = (0..<dataPair.count).map { WalletStorage.Document(id: issueReq.id, docType: docTypeToSave, docDataFormat: format, data: issueOutcome.getDataToSave(index: $0, format: format), docKeyInfo: nil, createdAt: Date(), metadata: nil, displayName: displayName, status: .issued) }

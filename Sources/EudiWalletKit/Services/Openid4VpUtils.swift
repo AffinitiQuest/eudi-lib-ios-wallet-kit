@@ -32,6 +32,27 @@ import SwiftyJSON
 import Tools
 
 class OpenId4VpUtils {
+	/// Encode bytes as multibase base58-btc (Bitcoin alphabet, prefix 'z').
+	/// Used for `proofValue` in Data Integrity proofs per the W3C VC Data Integrity spec.
+	private static func multibaseBase58BTC(_ bytes: Data) -> String {
+		let alphabet = Array("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+		var digits = [Int]()
+		for byte in bytes {
+			var carry = Int(byte)
+			for i in 0..<digits.count {
+				carry += digits[i] * 256
+				digits[i] = carry % 58
+				carry /= 58
+			}
+			while carry > 0 {
+				digits.append(carry % 58)
+				carry /= 58
+			}
+		}
+		let leadingOnes = bytes.prefix(while: { $0 == 0 }).count
+		let encoded = String(repeating: "1", count: leadingOnes) + digits.reversed().map { alphabet[$0] }
+		return "z" + encoded
+	}
 	//  example path: "$['eu.europa.ec.eudiw.pid.1']['family_name']"
 	static let pathNsItemRx = try! NSRegularExpression(pattern: #"\$\['([^']+)'\]\['([^']+)'\]"#, options: .caseInsensitive)
 	// example path: $.given_name_national_character
@@ -83,7 +104,7 @@ class OpenId4VpUtils {
 			if formatRequested == nil {
 				let credTypes = Set(docType.components(separatedBy: ","))
 				formatRequested = formatsRequested.first(where: { key, fmt in
-					guard fmt == .w3cJwt else { return false }
+					guard fmt == .w3cJwt || fmt == .ldpVc else { return false }
 					let requiredSets = key.components(separatedBy: ";").map { Set($0.components(separatedBy: ",")) }
 					return requiredSets.contains { credTypes.isSuperset(of: $0) }
 				})?.value
@@ -216,6 +237,69 @@ class OpenId4VpUtils {
 		return signedVpJwt.compactSerialization
 	}
 
+	/// Build and sign a Verifiable Presentation with Data Integrity proof for `ldp_vc` format.
+	///
+	/// Creates a JSON-LD VP wrapping the LDP-VC credential and adds an ECDSA Data Integrity proof.
+	/// Note: signing is performed over serialized document bytes (simplified — not full RDFC-1.0
+	/// canonicalization); sufficient for wallet interop testing.
+	///
+	/// - Parameters:
+	///   - ldpVcJson: The raw JSON-LD credential string to present.
+	///   - signer: The holder's secure-area signer.
+	///   - nonce: The nonce from the Authorization Request (replay protection).
+	///   - aud: The Verifier's client_id.
+	///   - holderDid: The holder's DID (used as verificationMethod).
+	/// - Returns: The VP as a JSON string, or nil if signing fails.
+	static func getLdpVcPresentation(_ ldpVcJson: String, signer: SecureAreaSigner, nonce: String, aud: String, holderDid: String) async throws -> String? {
+		guard let asyncSigner = signer as? AsyncSignerProtocol else { return nil }
+		guard let credData = ldpVcJson.data(using: .utf8),
+			  let credObj = try? JSONSerialization.jsonObject(with: credData) else { return nil }
+
+		let now = ISO8601DateFormatter().string(from: Date())
+
+		// Build VP document
+		let vp: [String: Any] = [
+			"@context": ["https://www.w3.org/2018/credentials/v1"],
+			"type": ["VerifiablePresentation"],
+			"verifiableCredential": [credObj]
+		]
+
+		// Proof options — no proofValue yet; used as one half of the signing input
+		let proofOptions: [String: Any] = [
+			"type": "DataIntegrityProof",
+			"cryptosuite": "ecdsa-jcs-2019",
+			"created": now,
+			"verificationMethod": holderDid,
+			"proofPurpose": "authentication",
+			"challenge": nonce,
+			"domain": aud
+		]
+
+		// Signing input per ecdsa-jcs-2019 spec: SHA-256(JCS(proofOptions)) || SHA-256(JCS(vp))
+		// RFC 8785 (JCS) forbids escaping '/'; Swift's JSONSerialization always escapes it as '\/' — fix before hashing
+		let proofOptionsData = try JSONSerialization.data(withJSONObject: proofOptions, options: [.sortedKeys])
+		let proofOptionsJCS = String(data: proofOptionsData, encoding: .utf8)!.replacingOccurrences(of: "\\/", with: "/")
+		let vpRaw = try JSONSerialization.data(withJSONObject: vp, options: [.sortedKeys])
+		let vpJCS = String(data: vpRaw, encoding: .utf8)!.replacingOccurrences(of: "\\/", with: "/")
+		let proofHash = Data(SHA256.hash(data: Data(proofOptionsJCS.utf8)))
+		let docHash = Data(SHA256.hash(data: Data(vpJCS.utf8)))
+		let signingData = proofHash + docHash
+		let signature = try await asyncSigner.signAsync(signingData)
+
+		// Encode signature as multibase base58-btc (prefix 'z') per W3C Data Integrity spec
+		let proofValue = multibaseBase58BTC(signature)
+
+		// Assemble final VP with completed proof
+		var proofWithValue = proofOptions
+		proofWithValue["proofValue"] = proofValue
+		var vpWithProof = vp
+		vpWithProof["proof"] = proofWithValue
+
+		guard let vpData = try? JSONSerialization.data(withJSONObject: vpWithProof, options: [.sortedKeys]),
+			  let vpJson = String(data: vpData, encoding: .utf8) else { return nil }
+		return vpJson
+	}
+
 	static func sha256Hash(_ input: String) -> String {
 		let inputData = Array(input.utf8)
 		let digest = SHA256.hash(data: inputData)
@@ -244,7 +328,7 @@ extension ClaimPathElement {
 
 extension CredentialQuery {
 	public var docType: String? {
-		let metaDocType = meta.dictionaryObject?.first?.value
+		let metaDocType = meta["type_values"].exists() ? meta["type_values"].object : meta.dictionaryObject?.first?.value
 		if metaDocType is String {
 			return metaDocType as? String
 		} else if let arr = metaDocType as? [Any], !arr.isEmpty {
@@ -264,7 +348,7 @@ extension CredentialQuery {
 	}
 
 	public var dataFormat: DocDataFormat {
-		format.format == "mso_mdoc" ? .cbor : format.format == "jwt_vc_json" || format.format == "vc+jwt" ? .w3cJwt : .sdjwt
+		format.format == "mso_mdoc" ? .cbor : format.format == "jwt_vc_json" || format.format == "vc+jwt" ? .w3cJwt : format.format == "ldp_vc" ? .ldpVc : .sdjwt
 	}
 }
 

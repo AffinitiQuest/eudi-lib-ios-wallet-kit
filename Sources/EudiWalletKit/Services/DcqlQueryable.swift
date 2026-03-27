@@ -48,6 +48,11 @@ public class DefaultDcqlQueryable: DcqlQueryable {
 				let requiredSets = docOrVctType.components(separatedBy: ";")
 					.map { Set($0.components(separatedBy: ",")) }
 				return requiredSets.contains { available.isSuperset(of: $0) }
+			} else if docDataFormat == .ldpVc {
+				let available = Set(value.docType.components(separatedBy: ","))
+				let requiredSets = docOrVctType.components(separatedBy: ";")
+					.map { Set($0.components(separatedBy: ",")) }
+				return requiredSets.contains { available.isSuperset(of: $0) }
 			}
 			return value.docType == docOrVctType
 		}.map { $0.key }

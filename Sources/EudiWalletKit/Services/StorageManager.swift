@@ -135,6 +135,7 @@ public final class StorageManager: ObservableObject, @unchecked Sendable {
 		case .cbor:	toCborMdocModel(doc: doc, uiCulture: uiCulture, modelFactory: modelFactory)
 		case .sdjwt: toSdJwtDocModel(doc: doc, uiCulture: uiCulture, modelFactory: modelFactory)
 		case .w3cJwt: toW3cJwtDocModel(doc: doc, uiCulture: uiCulture, modelFactory: modelFactory)
+		case .ldpVc: toLdpVcDocModel(doc: doc, uiCulture: uiCulture)
 		}
 	}
 
@@ -196,6 +197,26 @@ public final class StorageManager: ObservableObject, @unchecked Sendable {
 		return GenericMdocModel(id: doc.id, createdAt: doc.createdAt, docType: docType, displayName: docMetadata?.getDisplayName(uiCulture), display: docMetadata?.display, issuerDisplay: docMetadata?.issuerDisplay, credentialIssuerIdentifier: md?.credentialIssuerIdentifier, configurationIdentifier: md?.configurationIdentifier, validFrom: validFrom, validUntil: validUntil, statusIdentifier: nil, credentialsUsageCounts: nil, credentialPolicy: docKeyInfo.credentialPolicy, secureAreaName: docKeyInfo.secureAreaName, modifiedAt: doc.modifiedAt, docClaims: docClaims, docDataFormat: .w3cJwt, hashingAlg: nil)
 	}
 
+	public static func toLdpVcDocModel(doc: WalletStorage.Document, uiCulture: String?) -> (any DocClaimsDecodable)? {
+		guard let jsonString = String(data: doc.data, encoding: .utf8),
+			  let jsonData = jsonString.data(using: .utf8),
+			  let payloadJson = try? JSON(data: jsonData) else { return nil }
+		let docMetadata: DocMetadata? = DocMetadata(from: doc.metadata)
+		let docKeyInfo = DocKeyInfo(from: doc.docKeyInfo) ?? .default
+		let md = docMetadata?.getMetadata(uiCulture: uiCulture)
+		// credentialSubject is at the top level for ldp_vc
+		let credentialSubjectJson = payloadJson["credentialSubject"]
+		var docClaims = [DocClaim]()
+		if credentialSubjectJson.type != .null, let cs = credentialSubjectJson.toClaimsArray(pathPrefix: [], md?.claimMetadata, uiCulture)?.0 {
+			docClaims.append(contentsOf: cs)
+		}
+		let typeArray = payloadJson["type"].arrayValue.compactMap { $0.string }
+		let docType = doc.docType ?? typeArray.last
+		let validFrom: Date? = (payloadJson["validFrom"].string ?? payloadJson["issuanceDate"].string).flatMap { ISO8601DateFormatter().date(from: $0) }
+		let validUntil: Date? = (payloadJson["validUntil"].string ?? payloadJson["expirationDate"].string).flatMap { ISO8601DateFormatter().date(from: $0) }
+		return GenericMdocModel(id: doc.id, createdAt: doc.createdAt, docType: docType, displayName: docMetadata?.getDisplayName(uiCulture), display: docMetadata?.display, issuerDisplay: docMetadata?.issuerDisplay, credentialIssuerIdentifier: md?.credentialIssuerIdentifier, configurationIdentifier: md?.configurationIdentifier, validFrom: validFrom, validUntil: validUntil, statusIdentifier: nil, credentialsUsageCounts: nil, credentialPolicy: docKeyInfo.credentialPolicy, secureAreaName: docKeyInfo.secureAreaName, modifiedAt: doc.modifiedAt, docClaims: docClaims, docDataFormat: .ldpVc, hashingAlg: nil)
+	}
+
 	public static func getHashingAlgorithm(doc: WalletStorage.Document) -> String? {
 		guard doc.docDataFormat == .sdjwt else { return nil }
 		guard let recreatedClaims = recreateSdJwtClaims(docData: doc.data) else { return nil }
@@ -238,6 +259,7 @@ public final class StorageManager: ObservableObject, @unchecked Sendable {
 			case .cbor: if let iss = try? IssuerSigned(data: doc.data.bytes) { .msoMdoc(iss) } else { nil }
 			case .sdjwt: if let serString = String(data: doc.data, encoding: .utf8), let sd = try? CompactParser().getSignedSdJwt(serialisedString: serString) { .sdJwt(sd) } else { nil }
 			case .w3cJwt: if let serString = String(data: doc.data, encoding: .utf8) { .w3cJwt(serString) } else { nil }
+			case .ldpVc: if let serString = String(data: doc.data, encoding: .utf8) { .ldpVc(serString) } else { nil }
 			}
 			guard let docTypedData else { return nil }
 			let presentInfo = DocPresentInfo(docType: m.docType!, secureAreaName: dki.secureAreaName, docDataFormat: m.docDataFormat, displayName: m.displayName, docClaims: m.docClaims, typedData: docTypedData)

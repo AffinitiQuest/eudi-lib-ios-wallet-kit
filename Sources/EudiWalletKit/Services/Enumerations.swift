@@ -37,6 +37,7 @@ public enum DocTypedData: Sendable {
 	case msoMdoc(IssuerSigned)
 	case sdJwt(SignedSDJWT)
 	case w3cJwt(String)
+	case ldpVc(String)
 }
 
 public enum PopUsage: String, Sendable {

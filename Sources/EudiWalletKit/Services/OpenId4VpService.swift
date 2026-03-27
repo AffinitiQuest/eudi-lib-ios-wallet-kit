@@ -62,6 +62,7 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 	// map of document-id to SignedSDJWT
 	var docsSdJwt: [String: SignedSDJWT]!
 	var docsW3cJwt: [String: String]!
+	var docsLdpVc: [String: String]!
 	var dcqlQueryable: DefaultDcqlQueryable!
 	// map of document-id to hashing algorithm
 	var docsHashingAlgs: [String: String]!
@@ -215,6 +216,8 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 		docsSdJwt = docStrings.compactMapValues { try? parser.getSignedSdJwt(serialisedString: $0) }
 		let w3cJwtDocStrings = docs.filter { k,v in Self.filterFormat(dataFormats[k]!, fmt: .w3cJwt)}.compactMapValues { String(data: $0, encoding: .utf8) }
 		docsW3cJwt = w3cJwtDocStrings.compactMapValues { $0 }
+		let ldpVcDocStrings = docs.filter { k,v in Self.filterFormat(dataFormats[k]!, fmt: .ldpVc)}.compactMapValues { String(data: $0, encoding: .utf8) }
+		docsLdpVc = ldpVcDocStrings.compactMapValues { $0 }
 		// make dcqlQueryable
 		var credentialMap = [String: (String, DocDataFormat)]()
 		w3cJwtDocIdToQueryKey = [:]
@@ -225,6 +228,16 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 				let credTypes = Set(docType.components(separatedBy: ","))
 				if let (queryKey, format) = formatsRequested.first(where: { key, fmt in
 					guard fmt == .w3cJwt else { return false }
+					let requiredSets = key.components(separatedBy: ";").map { Set($0.components(separatedBy: ",")) }
+					return requiredSets.contains { credTypes.isSuperset(of: $0) }
+				}) {
+					credentialMap[docId] = (docType, format)
+					w3cJwtDocIdToQueryKey[docId] = queryKey
+				}
+			} else if dataFormats[docId] == .ldpVc {
+				let credTypes = Set(docType.components(separatedBy: ","))
+				if let (queryKey, format) = formatsRequested.first(where: { key, fmt in
+					guard fmt == .ldpVc else { return false }
 					let requiredSets = key.components(separatedBy: ";").map { Set($0.components(separatedBy: ",")) }
 					return requiredSets.contains { credTypes.isSuperset(of: $0) }
 				}) {
@@ -270,6 +283,21 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 						logger.info("IssuerSigned document \(docId) path \(path) value: \(value)")
 						paths.append(ClaimPath([.claim(name: String(path))]))
 						values[paths.last!] = [(value as? String) ?? ""]
+					}
+				}
+				claimPaths[docId] = paths
+				claimValues[docId] = values
+			}
+		}
+		for (docId, ldpVcJson) in docsLdpVc ?? [:] {
+			if let data = ldpVcJson.data(using: .utf8), let json = try? JSON(data: data) {
+				let credentialSubject = json["credentialSubject"]
+				paths.removeAll(); values.removeAll()
+				if credentialSubject.type != .null, let dict = credentialSubject.dictionary {
+					for (path, valueJson) in dict {
+						logger.info("LDP-VC document \(docId) path \(path) value: \(valueJson.stringValue)")
+						paths.append(ClaimPath([.claim(name: path)]))
+						values[paths.last!] = [valueJson.stringValue]
 					}
 				}
 				claimPaths[docId] = paths
@@ -335,6 +363,21 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 					continue
 				}
 				inputToPresentations.append((inputDescrId, docId, VerifiablePresentation.generic(vpJwt)))
+			} else if dataFormats[docId] == .ldpVc {
+				let docSigned = docsLdpVc[docId]; let dpk = privateKeyObjects[docId]
+				guard let docSigned, let dpk else { continue }
+				let unlockData = try await dpk.secureArea.unlockKey(id: docId)
+				let keyInfo = try await dpk.secureArea.getKeyBatchInfo(id: docId); let dsa = keyInfo.crv.defaultSigningAlgorithm
+				let signer = try SecureAreaSigner(secureArea: dpk.secureArea, id: docId, index: dpk.index, ecAlgorithm: dsa, unlockData: unlockData)
+				let publicKey = try await dpk.secureArea.getPublicKey(id: docId, index: dpk.index, curve: .P256)
+				var holderDid = ""
+				if let jsonData = try publicKey.toDictionary().jsonData {
+					holderDid = "did:jwk:\(jsonData.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: ""))#0"
+				}
+				guard let vpJson = try await OpenId4VpUtils.getLdpVcPresentation(docSigned, signer: signer, nonce: vpNonce, aud: vpClientId, holderDid: holderDid) else {
+					continue
+				}
+				inputToPresentations.append((inputDescrId, docId, VerifiablePresentation.generic(vpJson)))
 			}
 		}
 		try await SendVpTokens(inputToPresentations, dcql, resolved, onSuccess)

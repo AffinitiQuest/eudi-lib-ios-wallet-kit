@@ -447,6 +447,7 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 		let docMetadata = Dictionary(uniqueKeysWithValues: idsToDocData.map(\.metadata))
 		let idsToDocTypes = Dictionary(uniqueKeysWithValues: docs.compactMap { doc -> (String, String)? in
 			if let docType = doc.docType { return (doc.id, docType) }
+			if doc.docDataFormat == .ldpVc, let expanded = doc.ldpIRIExpansionStrings, !expanded.isEmpty { return (doc.id, expanded.sorted().joined(separator: ",")) }
 			if let docTypes = doc.docTypes, !docTypes.isEmpty { return (doc.id, docTypes.sorted().joined(separator: ",")) }
 			return nil
 		})
