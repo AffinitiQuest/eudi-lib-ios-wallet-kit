@@ -96,27 +96,20 @@ class OpenId4VpUtils {
 		return (formatsRequested, inputDescriptorMap)
 	}
 
-	static func getRequestItems(_ credentialMaps: [String: [ClaimsQuery]], idsToDocTypes: [String: String], formatsRequested: [String: DocDataFormat]) -> RequestItems {
+	static func getRequestItems(_ credentialMaps: [String: [ClaimsQuery]], idsToDocTypes: [String: String], formatsRequested: [String: DocDataFormat], credIdToQueryId: [String: String], inputDescriptorMap: [String: String]) -> RequestItems {
+		let queryIdToRequestedDocType = Dictionary(uniqueKeysWithValues: inputDescriptorMap.map { ($0.value, $0.key) })
 		var requestItems = RequestItems()
 		for (id, claims) in credentialMaps {
-			guard let docType = idsToDocTypes[id] else { continue }
-			var formatRequested = formatsRequested[docType]
-			if formatRequested == nil {
-				let credTypes = Set(docType.components(separatedBy: ","))
-				formatRequested = formatsRequested.first(where: { key, fmt in
-					guard fmt == .w3cJwt || fmt == .ldpVc else { return false }
-					let requiredSets = key.components(separatedBy: ";").map { Set($0.components(separatedBy: ",")) }
-					return requiredSets.contains { credTypes.isSuperset(of: $0) }
-				})?.value
-			}
-			guard let formatRequested else { continue }
+			let queryId = credIdToQueryId[id]
+			let requestedDocType = queryId.flatMap { queryIdToRequestedDocType[$0] } ?? idsToDocTypes[id]
+			guard let requestedDocType, let formatRequested = formatsRequested[requestedDocType] else { continue }
 			var nsItems: [String: [RequestItem]] = [:]
 			for claim in claims {
-				guard let pair =  Self.parseClaim(claim, formatRequested) else { continue }
+				guard let pair = Self.parseClaim(claim, formatRequested) else { continue }
 				if nsItems[pair.0] == nil { nsItems[pair.0] = [] }
 				if !nsItems[pair.0]!.contains(pair.1) { nsItems[pair.0]!.append(pair.1) }
 			}
-			requestItems[docType] = nsItems
+			requestItems[requestedDocType] = nsItems
 		}
 		return requestItems
 	}
@@ -251,7 +244,8 @@ class OpenId4VpUtils {
 	///   - holderDid: The holder's DID (used as verificationMethod).
 	/// - Returns: The VP as a JSON string, or nil if signing fails.
 	static func getLdpVcPresentation(_ ldpVcJson: String, signer: SecureAreaSigner, nonce: String, aud: String, holderDid: String) async throws -> String? {
-		guard let asyncSigner = signer as? AsyncSignerProtocol else { return nil }
+		print("LDP-VC sign — getLdpVcPresentation called, nonce: \(nonce), aud: \(aud), holderDid: \(holderDid)")
+		guard let asyncSigner = signer as? AsyncSignerProtocol else { print("LDP-VC sign — signer is not AsyncSignerProtocol, returning nil"); return nil }
 		guard let credData = ldpVcJson.data(using: .utf8),
 			  let credObj = try? JSONSerialization.jsonObject(with: credData) else { return nil }
 
@@ -298,6 +292,25 @@ class OpenId4VpUtils {
 		guard let vpData = try? JSONSerialization.data(withJSONObject: vpWithProof, options: [.sortedKeys]),
 			  let vpJson = String(data: vpData, encoding: .utf8) else { return nil }
 		return vpJson
+	}
+
+	/// Builds a did:jwk: DID from a CoseKey by encoding it as a standard RFC 7517 JWK.
+	/// Uses key.crv.jwkName for the curve string and derives kty from the curve family.
+	static func holderDidFromCoseKey(_ key: CoseKey) -> String {
+		let isOkp = key.crv == .ED25519 || key.crv == .ED448 || key.crv == .X25519 || key.crv == .X448
+		let kty = isOkp ? "OKP" : "EC"
+		var jwk: [String: Any] = [
+			"kty": kty,
+			"crv": key.crv.jwkName,
+			"x": Data(key.x).base64URLEncodedString()
+		]
+		if !isOkp { jwk["y"] = Data(key.y).base64URLEncodedString() }
+		guard let jsonData = try? JSONSerialization.data(withJSONObject: jwk, options: [.sortedKeys]) else { return "" }
+		let encoded = jsonData.base64EncodedString()
+			.replacingOccurrences(of: "+", with: "-")
+			.replacingOccurrences(of: "/", with: "_")
+			.replacingOccurrences(of: "=", with: "")
+		return "did:jwk:\(encoded)#0"
 	}
 
 	static func sha256Hash(_ input: String) -> String {
@@ -382,7 +395,7 @@ extension OpenId4VpUtils {
 	/// - Returns: A dictionary mapping matched credential IDs to arrays of ClaimPath objects representing
 	///            the claims to disclose
 	/// - Throws: WalletError if the query cannot be satisfied, with details about the first missing claim
-	static func resolveDcql(_ dcql: DCQL, queryable: DcqlQueryable) throws -> [String: [ClaimsQuery]] {
+	static func resolveDcql(_ dcql: DCQL, queryable: DcqlQueryable) throws -> (claims: [String: [ClaimsQuery]], credIdToQueryId: [String: String]) {
 		var result: [String: [ClaimsQuery]] = [:]
 		var lastError: WalletError?
 		var credentialQueryResults: [QueryId: (matchedCredId: String, claimQueries: [ClaimsQuery])] = [:]
@@ -447,7 +460,11 @@ extension OpenId4VpUtils {
 			if let notFoundCred {logger.warning("No credential found matching docType: \(notFoundCred.docType ?? "") with format: \(notFoundCred.format)")}
 			throw lastError ?? WalletError(description: "DCQL query could not be satisfied")
 		}
-		return result
+		var credIdToQueryId: [String: String] = [:]
+		for (queryId, match) in credentialQueryResults {
+			credIdToQueryId[match.matchedCredId] = queryId.value
+		}
+		return (result, credIdToQueryId)
 	}
 
 	/// Resolves claims for a specific credential query and credential

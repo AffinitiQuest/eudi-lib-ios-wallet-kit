@@ -222,7 +222,7 @@ extension JSON {
 				let isoDateStr = ISO8601DateFormatter().string(from: date)
 				return (.date(isoDateStr), date.formatted(date: .complete, time: .omitted))
 			}
-			return (.integer(UInt64(intValue)), stringValue)
+			return (.double(Double(intValue)), stringValue)
 		case .string:
 			if name == "portrait" || name == "signature_usual_mark", let d = Data(base64urlEncoded: stringValue) { return (.bytes(d.bytes), "\(d.count) bytes") }
 			return (.string(stringValue), stringValue)

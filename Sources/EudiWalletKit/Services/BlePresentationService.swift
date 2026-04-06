@@ -17,6 +17,7 @@ limitations under the License.
 import Foundation
 import MdocDataModel18013
 import MdocDataTransfer18013
+import MdocSecurity18013
 
 /// Implements proximity attestation presentation with QR to BLE data transfer
 
@@ -36,6 +37,22 @@ public final class BlePresentationService: @unchecked Sendable, PresentationServ
 		bleServerTransfer = try MdocGattServer(parameters: parameters)
 		transactionLog = TransactionLogUtils.initializeTransactionLog(type: .presentation, dataFormat: .cbor)
 		bleServerTransfer.delegate = self
+		bleServerTransfer.ldpVcVPGenerator = { [weak bleServerTransfer] docId, credentialJson, nonce in
+			guard let bleServerTransfer else { throw NSError(domain: "BlePresentation", code: 0, userInfo: [NSLocalizedDescriptionKey: "BLE server deallocated"]) }
+			guard let dpk = bleServerTransfer.privateKeyObjects[docId] else {
+				throw NSError(domain: "BlePresentation", code: 1, userInfo: [NSLocalizedDescriptionKey: "No private key for docId: \(docId)"])
+			}
+			let unlockData = bleServerTransfer.unlockData?[docId]
+			let keyInfo = try await dpk.secureArea.getKeyBatchInfo(id: docId)
+			let dsa = keyInfo.crv.defaultSigningAlgorithm
+			let signer = try SecureAreaSigner(secureArea: dpk.secureArea, id: docId, index: dpk.index, ecAlgorithm: dsa, unlockData: unlockData)
+			let publicKey = try await dpk.secureArea.getPublicKey(id: docId, index: dpk.index, curve: .P256)
+			let holderDid = OpenId4VpUtils.holderDidFromCoseKey(publicKey)
+			guard let vpJson = try await OpenId4VpUtils.getLdpVcPresentation(credentialJson, signer: signer, nonce: nonce, aud: "ble", holderDid: holderDid) else {
+				throw NSError(domain: "BlePresentation", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to generate LDP-VC VP"])
+			}
+			return vpJson
+		}
 	}
 
 	/// Generate device engagement QR code

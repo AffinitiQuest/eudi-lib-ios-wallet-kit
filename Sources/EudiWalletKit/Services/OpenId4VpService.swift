@@ -179,8 +179,8 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 			let (fmtsReq, imap) = try OpenId4VpUtils.parseDcqlFormats(dcql, idsToDocTypes: idsToDocTypes, dataFormats: dataFormats, docDisplayNames: docDisplayNames, logger: logger)
 			formatsRequested = fmtsReq; inputDescriptorMap = imap
 			decodeDocuments()
-			let claimMapPath = try OpenId4VpUtils.resolveDcql(dcql, queryable: dcqlQueryable)
-			requestItems = OpenId4VpUtils.getRequestItems(claimMapPath, idsToDocTypes: idsToDocTypes, formatsRequested: formatsRequested)
+			let (claimMapPath, credIdToQueryId) = try OpenId4VpUtils.resolveDcql(dcql, queryable: dcqlQueryable)
+			requestItems = OpenId4VpUtils.getRequestItems(claimMapPath, idsToDocTypes: idsToDocTypes, formatsRequested: formatsRequested, credIdToQueryId: credIdToQueryId, inputDescriptorMap: imap)
 		}
 		self.transactionData = vp.transactionData
 		guard let requestItems, let formatsRequested else { throw PresentationSession.makeError(str: "Invalid request query") }
@@ -222,7 +222,7 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 		var credentialMap = [String: (String, DocDataFormat)]()
 		w3cJwtDocIdToQueryKey = [:]
 		for (docId, docType) in idsToDocTypes {
-			if let format = formatsRequested[docType] {
+			if let format = formatsRequested[docType], dataFormats[docId] == format {
 				credentialMap[docId] = (docType, format)
 			} else if dataFormats[docId] == .w3cJwt {
 				let credTypes = Set(docType.components(separatedBy: ","))
@@ -355,10 +355,7 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 				let signer = try SecureAreaSigner(secureArea: dpk.secureArea, id: docId, index: dpk.index, ecAlgorithm: dsa, unlockData: unlockData)
 				let signAlg = try SecureAreaSigner.getSigningAlgorithm(dsa)
 				let publicKey = try await dpk.secureArea.getPublicKey(id: docId, index: dpk.index, curve: .P256)
-				var holderDid = ""
-				if let jsonData = try publicKey.toDictionary().jsonData {
-					holderDid = "did:jwk:\(jsonData.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: ""))#0"
-				}
+				let holderDid = OpenId4VpUtils.holderDidFromCoseKey(publicKey)
 				guard let vpJwt = try await OpenId4VpUtils.getJwtVcPresentation(docSigned, signer: signer, signAlg: signAlg, nonce: vpNonce, aud: vpClientId, holderDid: holderDid) else {
 					continue
 				}
@@ -370,10 +367,7 @@ public final class OpenId4VpService: @unchecked Sendable, PresentationService {
 				let keyInfo = try await dpk.secureArea.getKeyBatchInfo(id: docId); let dsa = keyInfo.crv.defaultSigningAlgorithm
 				let signer = try SecureAreaSigner(secureArea: dpk.secureArea, id: docId, index: dpk.index, ecAlgorithm: dsa, unlockData: unlockData)
 				let publicKey = try await dpk.secureArea.getPublicKey(id: docId, index: dpk.index, curve: .P256)
-				var holderDid = ""
-				if let jsonData = try publicKey.toDictionary().jsonData {
-					holderDid = "did:jwk:\(jsonData.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: ""))#0"
-				}
+				let holderDid = OpenId4VpUtils.holderDidFromCoseKey(publicKey)
 				guard let vpJson = try await OpenId4VpUtils.getLdpVcPresentation(docSigned, signer: signer, nonce: vpNonce, aud: vpClientId, holderDid: holderDid) else {
 					continue
 				}

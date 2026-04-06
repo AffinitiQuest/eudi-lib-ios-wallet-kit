@@ -55,6 +55,8 @@ class TransactionLogUtils {
 					}
 				case .w3cJwt:
 					break
+				case .ldpVc:
+					break
 				}
 			}
 		} else if transactionLog.dataFormat == .json {
